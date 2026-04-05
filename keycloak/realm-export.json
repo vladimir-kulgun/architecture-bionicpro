@@ -1,26 +1,135 @@
 {
   "realm": "reports-realm",
   "enabled": true,
+
   "accessTokenLifespan": 120,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 1800,
   "refreshTokenMaxReuse": 0,
+
+  "browserFlow": "browser-mfa",
+
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyDigits": 6,
+  "otpPolicyPeriod": 30,
+  "otpPolicyLookAheadWindow": 1,
+  "otpPolicyInitialCounter": 0,
+  "otpPolicyCodeReusable": false,
+  "otpSupportedApplications": ["totpAppGoogleName"],
+
   "roles": {
     "realm": [
-      {
-        "name": "user",
-        "description": "Regular user role"
-      },
-      {
-        "name": "administrator",
-        "description": "Administrator role"
-      },
-      {
-        "name": "prothetic_user",
-        "description": "Prothetic user role with report access"
-      }
+      { "name": "user",          "description": "Regular user role" },
+      { "name": "administrator", "description": "Administrator role" },
+      { "name": "prothetic_user","description": "Prothetic user role with report access" }
     ]
   },
+
+  "requiredActions": [
+    {
+      "alias": "CONFIGURE_TOTP",
+      "name": "Configure OTP",
+      "providerId": "CONFIGURE_TOTP",
+      "enabled": true,
+      "defaultAction": true,
+      "priority": 10,
+      "config": {}
+    },
+    {
+      "alias": "UPDATE_PASSWORD",
+      "name": "Update Password",
+      "providerId": "UPDATE_PASSWORD",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 30,
+      "config": {}
+    },
+    {
+      "alias": "UPDATE_PROFILE",
+      "name": "Update Profile",
+      "providerId": "UPDATE_PROFILE",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 40,
+      "config": {}
+    },
+    {
+      "alias": "VERIFY_EMAIL",
+      "name": "Verify Email",
+      "providerId": "VERIFY_EMAIL",
+      "enabled": true,
+      "defaultAction": false,
+      "priority": 50,
+      "config": {}
+    },
+    {
+      "alias": "terms_and_conditions",
+      "name": "Terms and Conditions",
+      "providerId": "terms_and_conditions",
+      "enabled": false,
+      "defaultAction": false,
+      "priority": 20,
+      "config": {}
+    }
+  ],
+
+  "authenticationFlows": [
+    {
+      "alias": "browser-mfa",
+      "description": "Browser flow with mandatory TOTP (Google Authenticator)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "authenticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "identity-provider-redirector",
+          "requirement": "ALTERNATIVE",
+          "priority": 25,
+          "authenticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "flowAlias": "browser-mfa-forms",
+          "requirement": "ALTERNATIVE",
+          "priority": 30,
+          "authenticatorFlow": true,
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "browser-mfa-forms",
+      "description": "Username + password, then mandatory OTP",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "authenticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-otp-form",
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "authenticatorFlow": false,
+          "userSetupAllowed": true
+        }
+      ]
+    }
+  ],
+
   "users": [
     {
       "username": "user1",
@@ -77,6 +186,7 @@
       "realmRoles": ["prothetic_user"]
     }
   ],
+
   "clients": [
     {
       "clientId": "reports-frontend",
@@ -97,6 +207,7 @@
       "bearerOnly": true
     }
   ],
+
   "components": {
     "org.keycloak.storage.UserStorageProvider": [
       {
@@ -163,16 +274,16 @@
               "providerId": "role-ldap-mapper",
               "subComponents": {},
               "config": {
-                "roles.dn":                          ["ou=Groups,dc=example,dc=com"],
-                "role.name.ldap.attribute":          ["cn"],
-                "role.object.classes":               ["groupOfNames"],
-                "membership.ldap.attribute":         ["member"],
-                "membership.attribute.type":         ["DN"],
-                "membership.user.ldap.attribute":    ["uid"],
-                "mode":                              ["READ_ONLY"],
-                "user.roles.retrieve.strategy":      ["LOAD_ROLES_BY_MEMBER_ATTRIBUTE"],
-                "use.realm.roles.mapping":           ["true"],
-                "client.id":                         [""]
+                "roles.dn":                       ["ou=Groups,dc=example,dc=com"],
+                "role.name.ldap.attribute":       ["cn"],
+                "role.object.classes":            ["groupOfNames"],
+                "membership.ldap.attribute":      ["member"],
+                "membership.attribute.type":      ["DN"],
+                "membership.user.ldap.attribute": ["uid"],
+                "mode":                           ["READ_ONLY"],
+                "user.roles.retrieve.strategy":   ["LOAD_ROLES_BY_MEMBER_ATTRIBUTE"],
+                "use.realm.roles.mapping":        ["true"],
+                "client.id":                      [""]
               }
             }
           ]
