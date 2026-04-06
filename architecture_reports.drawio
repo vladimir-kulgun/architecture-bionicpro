@@ -1,0 +1,241 @@
+<mxfile host="app.diagrams.net" version="29.3.8">
+  <diagram id="reports-arch-001" name="Задание 2 — Reporting Architecture">
+    <mxGraphModel dx="1388" dy="614" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ══ Title ══════════════════════════════════════════════════════════ -->
+        <mxCell id="r_title" parent="1"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=18;fontStyle=1;"
+          value="BionicPRO — C4 Container Diagram: Reporting Service (ETL + OLAP)"
+          vertex="1">
+          <mxGeometry x="40" y="20" width="1200" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- ══ Actors ══════════════════════════════════════════════════════════ -->
+        <mxCell id="r_p1" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#08427B;fontColor=#ffffff;strokeColor=#052E56;fontSize=11;"
+          value="&lt;b&gt;Пилот протеза&lt;/b&gt;&lt;br&gt;[Person]&lt;br&gt;&lt;br&gt;Пользователь протеза.&lt;br&gt;Просматривает отчёты&lt;br&gt;о работе протеза."
+          vertex="1">
+          <mxGeometry x="60" y="65" width="175" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_p2" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#08427B;fontColor=#ffffff;strokeColor=#052E56;fontSize=11;"
+          value="&lt;b&gt;Оператор производства&lt;/b&gt;&lt;br&gt;[Person]&lt;br&gt;&lt;br&gt;Управляет заказами&lt;br&gt;через CRM."
+          vertex="1">
+          <mxGeometry x="260" y="65" width="175" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ══ System Boundary ════════════════════════════════════════════════ -->
+        <mxCell id="r_boundary" parent="1"
+          style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#444444;strokeWidth=2;dashed=1;verticalAlign=top;fontSize=13;fontStyle=1;align=left;spacingLeft=10;spacingTop=5;"
+          value="BionicPRO [System Boundary]"
+          vertex="1">
+          <mxGeometry x="40" y="220" width="1200" height="800" as="geometry" />
+        </mxCell>
+
+        <!-- ══ Layer 1: User-facing services (y=270) ══════════════════════════ -->
+
+        <!-- Frontend (existing) -->
+        <mxCell id="r_c1" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;fontColor=#ffffff;strokeColor=#0B4884;fontSize=11;"
+          value="&lt;b&gt;Frontend&lt;/b&gt;&lt;br&gt;[Container: React]&lt;br&gt;&lt;br&gt;Отображает отчёты&lt;br&gt;о работе протеза.&lt;br&gt;Авторизация через BFF."
+          vertex="1">
+          <mxGeometry x="80" y="270" width="195" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- BFF / bionicpro-auth (existing) -->
+        <mxCell id="r_c_bff" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;fontColor=#ffffff;strokeColor=#0B4884;fontSize=11;"
+          value="&lt;b&gt;BFF (bionicpro-auth)&lt;/b&gt;&lt;br&gt;[Container: Go]&lt;br&gt;&lt;br&gt;Хранит токены. Проксирует&lt;br&gt;запросы к Reports API&lt;br&gt;с Bearer-токеном."
+          vertex="1">
+          <mxGeometry x="330" y="270" width="205" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- Reports API (NEW) -->
+        <mxCell id="r_c2" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;"
+          value="&lt;b&gt;Reports API&lt;/b&gt;&lt;br&gt;[Container: Backend, Go]&lt;br&gt;&lt;br&gt;Генерирует отчёты по&lt;br&gt;авторизованным запросам.&lt;br&gt;RBAC: prothetic_user / admin.&lt;br&gt;Читает витрину ClickHouse."
+          vertex="1">
+          <mxGeometry x="590" y="270" width="215" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- API (existing) -->
+        <mxCell id="r_c3" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;fontColor=#ffffff;strokeColor=#0B4884;fontSize=11;"
+          value="&lt;b&gt;API&lt;/b&gt;&lt;br&gt;[Container: Backend]&lt;br&gt;&lt;br&gt;Принимает телеметрию&lt;br&gt;с протеза (4G). Валидирует&lt;br&gt;JWT, применяет RBAC."
+          vertex="1">
+          <mxGeometry x="860" y="270" width="195" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- ══ Layer 2: ETL (y=490) ═══════════════════════════════════════════ -->
+
+        <!-- Apache Airflow (NEW) -->
+        <mxCell id="r_c4" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;"
+          value="&lt;b&gt;Apache Airflow&lt;/b&gt;&lt;br&gt;[Container: ETL Orchestrator]&lt;br&gt;&lt;br&gt;&lt;b&gt;DAG 1 — sensor_etl&lt;/b&gt;: извлечь телеметрию из PostgreSQL → агрегировать по пользователю → загрузить в ClickHouse (расписание: каждый час)&lt;br&gt;&lt;b&gt;DAG 2 — crm_etl&lt;/b&gt;: извлечь клиентов / заказы / историю обслуживания из CRM DB → обогатить данные → загрузить в ClickHouse (расписание: каждую ночь)&lt;br&gt;&lt;b&gt;DAG 3 — data_quality&lt;/b&gt;: проверка полноты и корректности витрины после каждой загрузки"
+          vertex="1">
+          <mxGeometry x="200" y="500" width="740" height="160" as="geometry" />
+        </mxCell>
+
+        <!-- ══ Layer 3: Data stores (y=760) ═══════════════════════════════════ -->
+
+        <!-- PostgreSQL OLTP (existing) -->
+        <mxCell id="r_db1" parent="1"
+          style="shape=mxgraph.flowchart.database;whiteSpace=wrap;html=1;fillColor=#1168BD;fontColor=#ffffff;strokeColor=#0B4884;fontSize=11;"
+          value="&lt;b&gt;PostgreSQL&lt;/b&gt;&lt;br&gt;[Container: OLTP DB]&lt;br&gt;&lt;br&gt;Телеметрия протезов:&lt;br&gt;миосигналы, движения,&lt;br&gt;параметры, профили."
+          vertex="1">
+          <mxGeometry x="80" y="770" width="195" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- ClickHouse OLAP (NEW) -->
+        <mxCell id="r_db2" parent="1"
+          style="shape=mxgraph.flowchart.database;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;"
+          value="&lt;b&gt;ClickHouse&lt;/b&gt;&lt;br&gt;[Container: OLAP DB — Витрина]&lt;br&gt;&lt;br&gt;Агрегированные метрики:&lt;br&gt;эффективность протеза за&lt;br&gt;период, история заказов,&lt;br&gt;сервисные события."
+          vertex="1">
+          <mxGeometry x="370" y="770" width="215" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- CRM DB Oracle (external source) -->
+        <mxCell id="r_db3" parent="1"
+          style="shape=mxgraph.flowchart.database;whiteSpace=wrap;html=1;fillColor=#999999;fontColor=#ffffff;strokeColor=#6B6B6B;fontSize=11;"
+          value="&lt;b&gt;CRM DB&lt;/b&gt;&lt;br&gt;[External: Oracle]&lt;br&gt;&lt;br&gt;Данные клиентов,&lt;br&gt;заказов, истории&lt;br&gt;обслуживания."
+          vertex="1">
+          <mxGeometry x="680" y="770" width="195" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- Keycloak (existing, auth reference) -->
+        <mxCell id="r_kc" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;fontColor=#ffffff;strokeColor=#0B4884;fontSize=11;"
+          value="&lt;b&gt;Keycloak&lt;/b&gt;&lt;br&gt;[Container: Identity Broker]&lt;br&gt;&lt;br&gt;Выдаёт JWT (RBAC).&lt;br&gt;Reports API валидирует&lt;br&gt;роли из токена."
+          vertex="1">
+          <mxGeometry x="910" y="770" width="195" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- ══ External systems (outside right) ═══════════════════════════════ -->
+
+        <!-- CRM Bitrix24 -->
+        <mxCell id="r_ext_crm" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#999999;fontColor=#ffffff;strokeColor=#6B6B6B;fontSize=11;"
+          value="&lt;b&gt;CRM&lt;/b&gt;&lt;br&gt;[External: Битрикс24]&lt;br&gt;&lt;br&gt;Управление клиентами&lt;br&gt;и заказами."
+          vertex="1">
+          <mxGeometry x="1290" y="500" width="185" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- ══ Legend ══════════════════════════════════════════════════════════ -->
+        <mxCell id="r_leg0" parent="1"
+          style="text;html=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;align=left;"
+          value="&lt;b&gt;Легенда&lt;/b&gt;" vertex="1">
+          <mxGeometry x="1115" y="270" width="100" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="r_leg1" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;fontColor=#ffffff;strokeColor=#0B4884;fontSize=10;"
+          value="Существующий компонент" vertex="1">
+          <mxGeometry x="1115" y="305" width="205" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="r_leg2" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=10;strokeWidth=2;"
+          value="Новый компонент (этот спринт)" vertex="1">
+          <mxGeometry x="1115" y="350" width="205" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="r_leg3" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#999999;fontColor=#ffffff;strokeColor=#6B6B6B;fontSize=10;"
+          value="Внешняя система" vertex="1">
+          <mxGeometry x="1115" y="395" width="205" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="r_leg4" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#08427B;fontColor=#ffffff;strokeColor=#052E56;fontSize=10;"
+          value="Актор (Person)" vertex="1">
+          <mxGeometry x="1115" y="440" width="205" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- ══ Edges ═══════════════════════════════════════════════════════════ -->
+
+        <!-- Actor: Пилот → Frontend -->
+        <mxCell id="r_e1" edge="1" parent="1" source="r_p1" target="r_c1"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;"
+          value="Просматривает отчёты&lt;br&gt;(браузер)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Actor: Оператор → CRM -->
+        <mxCell id="r_e_op" edge="1" parent="1" source="r_p2" target="r_ext_crm"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;"
+          value="Управляет заказами">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="347" y="125" />
+              <mxPoint x="1383" y="125" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Frontend → BFF -->
+        <mxCell id="r_e2" edge="1" parent="1" source="r_c1" target="r_c_bff"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;"
+          value="HTTPS + Session Cookie">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- BFF → Reports API -->
+        <mxCell id="r_e3" edge="1" parent="1" source="r_c_bff" target="r_c2"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
+          value="Bearer Token&lt;br&gt;GET /reports/{user_id}">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Reports API → ClickHouse (READ) -->
+        <mxCell id="r_e4" edge="1" parent="1" source="r_c2" target="r_db2"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
+          value="SQL SELECT&lt;br&gt;(чтение витрины)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Reports API → Keycloak (validate JWT) -->
+        <mxCell id="r_e5" edge="1" parent="1" source="r_c2" target="r_kc"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#555555;"
+          value="Валидация JWT / роли">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- API → PostgreSQL (write telemetry, existing) -->
+        <mxCell id="r_e6" edge="1" parent="1" source="r_c3" target="r_db1"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#555555;"
+          value="Запись телеметрии (JDBC)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Airflow → PostgreSQL (DAG 1: Extract) -->
+        <mxCell id="r_e7" edge="1" parent="1" source="r_c4" target="r_db1"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
+          value="DAG 1: Extract&lt;br&gt;(SQL, каждый час)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Airflow → ClickHouse (DAG 1+2: Transform & Load) -->
+        <mxCell id="r_e8" edge="1" parent="1" source="r_c4" target="r_db2"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
+          value="DAG 1+2: Transform &amp; Load&lt;br&gt;(INSERT агрегаты)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Airflow → CRM DB (DAG 2: Extract) -->
+        <mxCell id="r_e9" edge="1" parent="1" source="r_c4" target="r_db3"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
+          value="DAG 2: Extract&lt;br&gt;(JDBC, каждую ночь)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CRM → CRM DB (external data flow) -->
+        <mxCell id="r_e10" edge="1" parent="1" source="r_ext_crm" target="r_db3"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;"
+          value="Данные клиентов и заказов">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
