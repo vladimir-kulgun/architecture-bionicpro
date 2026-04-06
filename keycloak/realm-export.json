@@ -20,9 +20,9 @@
 
   "roles": {
     "realm": [
-      { "name": "user",          "description": "Regular user role" },
-      { "name": "administrator", "description": "Administrator role" },
-      { "name": "prothetic_user","description": "Prothetic user role with report access" }
+      { "name": "user",           "description": "Regular user role" },
+      { "name": "administrator",  "description": "Administrator role" },
+      { "name": "prothetic_user", "description": "Prothetic user role with report access" }
     ]
   },
 
@@ -130,6 +130,92 @@
     }
   ],
 
+  "identityProviders": [
+    {
+      "alias": "yandex",
+      "displayName": "Яндекс ID",
+      "providerId": "oidc",
+      "enabled": true,
+      "trustEmail": false,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "authenticateByDefault": false,
+      "linkOnly": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "authorizationUrl":   "https://oauth.yandex.ru/authorize",
+        "tokenUrl":           "https://oauth.yandex.ru/token",
+        "userInfoUrl":        "https://login.yandex.ru/info?format=json",
+        "clientId":           "REPLACE_WITH_YANDEX_CLIENT_ID",
+        "clientSecret":       "REPLACE_WITH_YANDEX_CLIENT_SECRET",
+        "defaultScope":       "login:info login:email",
+        "clientAuthMethod":   "client_secret_post",
+        "syncMode":           "IMPORT",
+        "validateSignature":  "false",
+        "useJwksUrl":         "false",
+        "backchannelSupported": "false",
+        "disableUserInfoService": "false"
+      }
+    }
+  ],
+
+  "identityProviderMappers": [
+    {
+      "id": "ymap-0001",
+      "name": "yandex-username",
+      "identityProviderAlias": "yandex",
+      "identityProviderMapper": "oidc-username-idp-mapper",
+      "config": {
+        "syncMode": "INHERIT",
+        "template": "${CLAIM.login}"
+      }
+    },
+    {
+      "id": "ymap-0002",
+      "name": "yandex-email",
+      "identityProviderAlias": "yandex",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": {
+        "syncMode": "INHERIT",
+        "claim": "default_email",
+        "user.attribute": "email"
+      }
+    },
+    {
+      "id": "ymap-0003",
+      "name": "yandex-first-name",
+      "identityProviderAlias": "yandex",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": {
+        "syncMode": "INHERIT",
+        "claim": "first_name",
+        "user.attribute": "firstName"
+      }
+    },
+    {
+      "id": "ymap-0004",
+      "name": "yandex-last-name",
+      "identityProviderAlias": "yandex",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": {
+        "syncMode": "INHERIT",
+        "claim": "last_name",
+        "user.attribute": "lastName"
+      }
+    },
+    {
+      "id": "ymap-0005",
+      "name": "yandex-id",
+      "identityProviderAlias": "yandex",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": {
+        "syncMode": "INHERIT",
+        "claim": "id",
+        "user.attribute": "yandex_id"
+      }
+    }
+  ],
+
   "users": [
     {
       "username": "user1",
@@ -195,6 +281,7 @@
       "redirectUris": ["http://localhost:3000/*", "http://localhost:8001/auth/callback"],
       "webOrigins": ["http://localhost:3000"],
       "directAccessGrantsEnabled": false,
+      "consentRequired": true,
       "attributes": {
         "pkce.code.challenge.method": "S256"
       }

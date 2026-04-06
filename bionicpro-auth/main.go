@@ -8,10 +8,12 @@
 //   - Auto-refresh access_token via refresh_token when it expires
 //   - Rotate session ID on every authenticated proxy request (session fixation prevention)
 //   - Proxy authenticated requests to the upstream API with a Bearer token
+//   - Fetch user profile from Keycloak UserInfo (populated from Yandex) and persist to PostgreSQL
 package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -27,6 +29,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ── Configuration ──────────────────────────────────────────────────────────────
@@ -41,6 +45,7 @@ type config struct {
 	sessionLifetime time.Duration
 	cookieSecure    bool
 	encryptionKey   string
+	databaseURL     string
 }
 
 func loadConfig() config {
@@ -57,6 +62,7 @@ func loadConfig() config {
 		sessionLifetime: time.Duration(lifetime) * time.Second,
 		cookieSecure:    getenv("COOKIE_SECURE", "false") == "true",
 		encryptionKey:   os.Getenv("ENCRYPTION_KEY"),
+		databaseURL:     os.Getenv("DATABASE_URL"),
 	}
 }
 
@@ -69,13 +75,13 @@ func getenv(key, fallback string) string {
 
 // ── Crypto (AES-256-GCM) ───────────────────────────────────────────────────────
 
-// deriveKey produces a 32-byte AES key from an arbitrary secret via SHA-256.
+// deriveKey produces a 32-byte AES-256 key from an arbitrary secret via SHA-256.
 func deriveKey(secret string) []byte {
 	h := sha256.Sum256([]byte(secret))
 	return h[:]
 }
 
-// randomKey generates a cryptographically random 32-byte key.
+// randomKey generates a cryptographically random 32-byte AES-256 key.
 func randomKey() []byte {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
@@ -84,8 +90,7 @@ func randomKey() []byte {
 	return key
 }
 
-// encryptGCM encrypts plaintext with AES-256-GCM. The nonce is prepended to the
-// returned ciphertext so that decryptGCM only needs the key and the blob.
+// encryptGCM encrypts plaintext with AES-256-GCM; nonce is prepended to the result.
 func encryptGCM(key []byte, plaintext string) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -128,7 +133,7 @@ func decryptGCM(key, data []byte) (string, error) {
 // pkce returns a (code_verifier, code_challenge) pair for S256 PKCE.
 func pkce() (verifier, challenge string) {
 	b := make([]byte, 64)
-	io.ReadFull(rand.Reader, b) //nolint:errcheck — rand.Reader never errors
+	io.ReadFull(rand.Reader, b) //nolint:errcheck
 	verifier = base64.RawURLEncoding.EncodeToString(b)
 	h := sha256.Sum256([]byte(verifier))
 	challenge = base64.RawURLEncoding.EncodeToString(h[:])
@@ -146,7 +151,7 @@ func randomToken(n int) string {
 
 type session struct {
 	accessToken      string
-	encryptedRefresh []byte // AES-256-GCM encrypted refresh_token
+	encryptedRefresh []byte    // AES-256-GCM encrypted refresh_token
 	expiresAt        time.Time
 }
 
@@ -161,12 +166,67 @@ type tokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 }
 
+// userInfoClaims holds the profile returned by Keycloak's UserInfo endpoint.
+// Standard OIDC fields are populated by Keycloak attribute mappers from Yandex.
+type userInfoClaims struct {
+	Sub               string `json:"sub"`
+	PreferredUsername string `json:"preferred_username"`
+	Email             string `json:"email"`
+	GivenName         string `json:"given_name"`
+	FamilyName        string `json:"family_name"`
+	YandexID          string `json:"yandex_id"` // mapped via IdP attribute mapper
+}
+
+// ── Database ───────────────────────────────────────────────────────────────────
+
+const createTableSQL = `
+CREATE TABLE IF NOT EXISTS user_profiles (
+    id          BIGSERIAL    PRIMARY KEY,
+    keycloak_id VARCHAR(255) UNIQUE NOT NULL,
+    username    VARCHAR(255),
+    email       VARCHAR(255),
+    first_name  VARCHAR(255),
+    last_name   VARCHAR(255),
+    yandex_id   VARCHAR(255),
+    raw_claims  TEXT,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+)`
+
+const upsertProfileSQL = `
+INSERT INTO user_profiles
+    (keycloak_id, username, email, first_name, last_name, yandex_id, raw_claims, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+ON CONFLICT (keycloak_id) DO UPDATE SET
+    username   = EXCLUDED.username,
+    email      = EXCLUDED.email,
+    first_name = EXCLUDED.first_name,
+    last_name  = EXCLUDED.last_name,
+    yandex_id  = EXCLUDED.yandex_id,
+    raw_claims = EXCLUDED.raw_claims,
+    updated_at = now()`
+
+func initDB(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("ping: %w", err)
+	}
+	if _, err := pool.Exec(ctx, createTableSQL); err != nil {
+		return nil, fmt.Errorf("create table: %w", err)
+	}
+	return pool, nil
+}
+
 // ── Server ─────────────────────────────────────────────────────────────────────
 
 type server struct {
 	cfg    config
 	aesKey []byte
 	log    *slog.Logger
+	db     *pgxpool.Pool // nil when DATABASE_URL is not set
 
 	sessionMu sync.RWMutex
 	sessions  map[string]*session
@@ -180,17 +240,31 @@ func newServer(cfg config) *server {
 	if cfg.encryptionKey != "" {
 		key = deriveKey(cfg.encryptionKey)
 	} else {
-		// Auto-generate — sessions are lost on restart; set ENCRYPTION_KEY for persistence.
 		key = randomKey()
-		slog.Warn("ENCRYPTION_KEY not set — using ephemeral key; sessions will be lost on restart")
+		slog.Warn("ENCRYPTION_KEY not set — using ephemeral key; sessions lost on restart")
 	}
-	return &server{
+
+	srv := &server{
 		cfg:        cfg,
 		aesKey:     key,
 		log:        slog.Default(),
 		sessions:   make(map[string]*session),
 		pkceStates: make(map[string]*pkceState),
 	}
+
+	if cfg.databaseURL != "" {
+		pool, err := initDB(context.Background(), cfg.databaseURL)
+		if err != nil {
+			slog.Error("DB init failed — profile saving disabled", "err", err)
+		} else {
+			srv.db = pool
+			slog.Info("DB connected — user profiles will be persisted")
+		}
+	} else {
+		slog.Warn("DATABASE_URL not set — user profiles will not be persisted")
+	}
+
+	return srv
 }
 
 // ── Session management ──────────────────────────────────────────────────────────
@@ -212,8 +286,7 @@ func (s *server) createSession(accessToken, refreshToken string, expiresIn int) 
 	return id, nil
 }
 
-// rotateSession moves session data to a fresh ID and deletes the old one.
-// Caller must hold s.sessionMu write lock.
+// rotateSession moves session data to a fresh ID; caller must hold write lock.
 func (s *server) rotateSession(oldID string) (string, bool) {
 	sess, ok := s.sessions[oldID]
 	if !ok {
@@ -247,6 +320,11 @@ func (s *server) tokenURL() string {
 
 func (s *server) authURL() string {
 	return fmt.Sprintf("%s/realms/%s/protocol/openid-connect/auth",
+		s.cfg.keycloakURL, s.cfg.keycloakRealm)
+}
+
+func (s *server) userInfoURL() string {
+	return fmt.Sprintf("%s/realms/%s/protocol/openid-connect/userinfo",
 		s.cfg.keycloakURL, s.cfg.keycloakRealm)
 }
 
@@ -294,11 +372,73 @@ func (s *server) doRefresh(r *http.Request, refreshToken string) (*tokenResponse
 	})
 }
 
+// fetchUserInfo calls Keycloak's UserInfo endpoint with the given access token.
+// The returned claims include attributes mapped from Yandex by IdP mappers.
+func (s *server) fetchUserInfo(ctx context.Context, accessToken string) ([]byte, *userInfoClaims, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.userInfoURL(), nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("userinfo %d: %s", resp.StatusCode, raw)
+	}
+
+	var claims userInfoClaims
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		return nil, nil, fmt.Errorf("decode userinfo: %w", err)
+	}
+	return raw, &claims, nil
+}
+
+// saveProfile upserts the user's profile into the user_profiles table.
+// Runs asynchronously so it never blocks the HTTP response.
+func (s *server) saveProfile(accessToken string) {
+	if s.db == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		raw, claims, err := s.fetchUserInfo(ctx, accessToken)
+		if err != nil {
+			s.log.Warn("fetchUserInfo failed — profile not saved", "err", err)
+			return
+		}
+
+		_, err = s.db.Exec(ctx, upsertProfileSQL,
+			claims.Sub,
+			claims.PreferredUsername,
+			claims.Email,
+			claims.GivenName,
+			claims.FamilyName,
+			claims.YandexID,
+			string(raw),
+		)
+		if err != nil {
+			s.log.Error("upsert profile", "err", err)
+			return
+		}
+		s.log.Info("profile saved", "sub", claims.Sub, "username", claims.PreferredUsername)
+	}()
+}
+
 // ── HTTP handlers ──────────────────────────────────────────────────────────────
 
 // GET /auth/login
-// Generates PKCE pair + opaque state, caches the code_verifier, then redirects
-// the browser to Keycloak.
+//
+// Generates a fresh PKCE pair and state token, stores them server-side, then
+// redirects the browser to Keycloak's authorization endpoint. The code_verifier
+// never leaves the server, satisfying the BFF security requirement.
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	verifier, challenge := pkce()
 	state := randomToken(16)
@@ -320,9 +460,11 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /auth/callback
-// Validates state, exchanges the authorisation code for tokens, creates a
-// session, and redirects the browser back to the frontend with an HTTP-only
-// session cookie.
+//
+// Keycloak redirects here after the user authenticates (+ consents + completes OTP).
+// Validates state, exchanges the authorisation code for tokens using the stored
+// code_verifier, creates an encrypted server-side session, issues an HTTP-only
+// session cookie, and asynchronously persists the user profile to PostgreSQL.
 func (s *server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
@@ -357,12 +499,19 @@ func (s *server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch user profile from Keycloak UserInfo (includes Yandex-sourced attributes)
+	// and persist to DB asynchronously — does not block the redirect.
+	s.saveProfile(tr.AccessToken)
+
 	s.setSessionCookie(w, sessionID)
 	http.Redirect(w, r, s.cfg.frontendURL, http.StatusFound)
 }
 
 // GET /auth/session
+//
 // Lightweight session check used by the frontend to determine auth state.
+// Returns 200 {"status":"authenticated"} if a valid session cookie is present,
+// 401 otherwise. Does not rotate the session or touch tokens.
 func (s *server) handleSession(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie("session_id")
 	if err != nil {
@@ -382,7 +531,10 @@ func (s *server) handleSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /auth/logout
-// Destroys the server-side session and clears the cookie.
+//
+// Destroys the server-side session and clears the cookie. Tokens are removed
+// from memory; the frontend is effectively logged out immediately without
+// needing to wait for token expiry.
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("session_id"); err == nil {
 		s.sessionMu.Lock()
@@ -396,6 +548,7 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // ANY /api/{path...}
+//
 // Per-request flow:
 //  1. Require valid session cookie.
 //  2. If access_token is expired, refresh it via refresh_token (lock released during
@@ -404,13 +557,14 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 //  4. Forward original request to the upstream API with a Bearer token.
 //  5. Return upstream response + updated session cookie.
 func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	
 	cookie, err := r.Cookie("session_id")
 	if err != nil {
 		http.Error(w, "missing session cookie", http.StatusUnauthorized)
 		return
 	}
 	sessionID := cookie.Value
-
+	
 	// ── Phase 1: read session under read lock ─────────────────────────────────
 	s.sessionMu.RLock()
 	sess, ok := s.sessions[sessionID]
@@ -427,7 +581,6 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if time.Now().After(sess.expiresAt) {
 		s.log.Info("access token expired — refreshing", "session", sessionID[:8])
 
-		// Snapshot the encrypted refresh token so we can work without the lock.
 		s.sessionMu.RLock()
 		encCopy := make([]byte, len(sess.encryptedRefresh))
 		copy(encCopy, sess.encryptedRefresh)
@@ -438,7 +591,6 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			s.sessionMu.Lock()
 			delete(s.sessions, sessionID)
 			s.sessionMu.Unlock()
-			s.log.Error("decrypt refresh token", "err", err)
 			http.Error(w, "session corrupted", http.StatusUnauthorized)
 			return
 		}
@@ -448,12 +600,10 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			s.sessionMu.Lock()
 			delete(s.sessions, sessionID)
 			s.sessionMu.Unlock()
-			s.log.Warn("token refresh failed", "err", err)
 			http.Error(w, "token refresh failed — please log in again", http.StatusUnauthorized)
 			return
 		}
 
-		// Update session under write lock.
 		enc, err := encryptGCM(s.aesKey, tr.RefreshToken)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -467,14 +617,11 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			current.expiresAt = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
 			accessToken = current.accessToken
 		} else {
-			// Session was invalidated by a concurrent request during the refresh call.
 			s.sessionMu.Unlock()
 			http.Error(w, "session expired during refresh", http.StatusUnauthorized)
 			return
 		}
 		s.sessionMu.Unlock()
-
-		s.log.Info("tokens refreshed", "session", sessionID[:8])
 	}
 
 	// ── Phase 3: rotate session ID ────────────────────────────────────────────
@@ -502,7 +649,6 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy headers; strip hop-by-hop and security-sensitive ones.
 	skipHeaders := map[string]bool{
 		"cookie": true, "authorization": true,
 		"host": true, "content-length": true,
@@ -568,7 +714,7 @@ func main() {
 	slog.Info("bionicpro-auth ready", "addr", addr,
 		"keycloak", cfg.keycloakURL,
 		"frontend", cfg.frontendURL,
-		"cookie_secure", cfg.cookieSecure,
+		"db_enabled", cfg.databaseURL != "",
 	)
 
 	if err := http.ListenAndServe(addr, srv.cors(mux)); err != nil {
