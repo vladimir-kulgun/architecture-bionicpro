@@ -178,6 +178,20 @@ services:
       - keycloak
       - app_db
 
+  # ── Reports API — бэкенд отчётов (Go, читает ClickHouse) ────────────────────
+  api:
+    build:
+      context: ./reports-api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: "8000"
+      CLICKHOUSE_URL: http://clickhouse:8123
+      FRONTEND_URL: http://localhost:3000
+    depends_on:
+      - clickhouse
+
   frontend:
     build:
       context: ./frontend
