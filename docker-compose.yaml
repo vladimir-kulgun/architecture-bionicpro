@@ -1,5 +1,31 @@
 version: '3.8'
 
+# ── Shared Airflow configuration (YAML anchor) ────────────────────────────────
+x-airflow-common:
+  &airflow-common
+  image: apache/airflow:2.9.2
+  environment:
+    &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_db:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # Dev-only fernet key — generate a real one for production:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    AIRFLOW__CORE__FERNET_KEY: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstA="
+    AIRFLOW__WEBSERVER__SECRET_KEY: "bionicpro-dev-secret"
+    # Connections injected via env (no manual UI setup required)
+    AIRFLOW_CONN_BIONICPRO_POSTGRES: postgresql://bionicpro_user:bionicpro_password@app_db:5432/bionicpro
+    AIRFLOW_CONN_BIONICPRO_CRM_DB: postgresql://crm_user:crm_password@crm_db:5432/crm
+    # Extra Python packages installed at startup
+    _PIP_ADDITIONAL_REQUIREMENTS: "apache-airflow-providers-postgres requests"
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+  depends_on:
+    - airflow_db
+    - app_db
+    - crm_db
+    - clickhouse
+
 services:
   openldap:
     image: osixia/openldap:1.5.0
@@ -22,8 +48,86 @@ services:
       POSTGRES_PASSWORD: bionicpro_password
     volumes:
       - ./postgres-app-data:/var/lib/postgresql/data
+      # Telemetry schema + seed data — runs once on first container start
+      - ./init-scripts/app_db_init.sql:/docker-entrypoint-initdb.d/01_app_db_init.sql
     ports:
       - "5434:5432"
+
+  # ── CRM database (PostgreSQL simulating Oracle CRM DB) ──────────────────────
+  crm_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: crm
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password
+    volumes:
+      - ./postgres-crm-data:/var/lib/postgresql/data
+      # CRM schema (customers, orders, service_history) + seed data
+      - ./init-scripts/crm_db_init.sql:/docker-entrypoint-initdb.d/01_crm_db_init.sql
+    ports:
+      - "5435:5432"
+
+  # ── ClickHouse — OLAP data mart ──────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    ports:
+      - "8123:8123"   # HTTP API  (used by Airflow DAG and Reports API)
+      - "9000:9000"   # Native TCP client (optional, for clickhouse-client CLI)
+    volumes:
+      - ./clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  # ── Airflow metadata database ─────────────────────────────────────────────────
+  airflow_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - ./postgres-airflow-data:/var/lib/postgresql/data
+    ports:
+      - "5436:5432"
+
+  # ── Airflow: one-time DB init + admin user creation ──────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "
+        pip install apache-airflow-providers-postgres requests --quiet &&
+        airflow db upgrade &&
+        airflow users create
+          --username admin --password admin
+          --firstname Admin --lastname BionicPRO
+          --role Admin --email admin@bionicpro.com
+      "
+    restart: "no"
+
+  # ── Airflow Scheduler ─────────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    command: airflow scheduler
+    restart: unless-stopped
+    depends_on:
+      - airflow-init
+      - airflow_db
+      - app_db
+      - crm_db
+      - clickhouse
+
+  # ── Airflow Webserver ─────────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    command: airflow webserver
+    ports:
+      - "8082:8080"
+    restart: unless-stopped
+    depends_on:
+      - airflow-init
+      - airflow_db
 
   keycloak_db:
     image: postgres:14
