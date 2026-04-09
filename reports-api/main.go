@@ -401,15 +401,22 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // parseDateRange reads optional ?from and ?to query params (YYYY-MM-DD).
 // Defaults: from = 30 days ago, to = yesterday.
+// Maximum allowed date is yesterday: Airflow processes data for the previous
+// day only, so today and future dates are never present in ClickHouse.
 // Returns (from, to, true) on success; writes a 400 and returns false on bad input.
 func parseDateRange(w http.ResponseWriter, r *http.Request) (from, to string, ok bool) {
 	now := time.Now().UTC()
+	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 	from = now.AddDate(0, 0, -30).Format("2006-01-02")
-	to = now.AddDate(0, 0, -1).Format("2006-01-02")
+	to = yesterday
 
 	if v := r.URL.Query().Get("from"); v != "" {
 		if _, err := time.Parse("2006-01-02", v); err != nil {
 			http.Error(w, "'from' must be YYYY-MM-DD", http.StatusBadRequest)
+			return "", "", false
+		}
+		if v > yesterday {
+			http.Error(w, fmt.Sprintf("'from' cannot exceed %s: Airflow processes data for the previous day only", yesterday), http.StatusBadRequest)
 			return "", "", false
 		}
 		from = v
@@ -417,6 +424,10 @@ func parseDateRange(w http.ResponseWriter, r *http.Request) (from, to string, ok
 	if v := r.URL.Query().Get("to"); v != "" {
 		if _, err := time.Parse("2006-01-02", v); err != nil {
 			http.Error(w, "'to' must be YYYY-MM-DD", http.StatusBadRequest)
+			return "", "", false
+		}
+		if v > yesterday {
+			http.Error(w, fmt.Sprintf("'to' cannot exceed %s: Airflow processes data for the previous day only", yesterday), http.StatusBadRequest)
 			return "", "", false
 		}
 		to = v

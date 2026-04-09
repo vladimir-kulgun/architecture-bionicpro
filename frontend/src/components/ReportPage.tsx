@@ -57,6 +57,10 @@ function defaultTo(): string {
   return isoDate(d);
 }
 
+// Airflow DAG runs at 02:00 UTC and processes data for the previous day only.
+// Dates from today onward are never in ClickHouse.
+const MAX_DATE = defaultTo(); // yesterday
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 const ReportPage: React.FC = () => {
@@ -157,6 +161,7 @@ const ReportPage: React.FC = () => {
                 type="date"
                 value={to}
                 min={from}
+                max={MAX_DATE}
                 onChange={e => setTo(e.target.value)}
                 className="mt-1 border border-gray-300 rounded px-2 py-1 text-gray-800"
               />
@@ -172,6 +177,10 @@ const ReportPage: React.FC = () => {
               {loading ? 'Загрузка...' : 'Получить отчёт'}
             </button>
           </div>
+
+          <p className="text-xs text-gray-400 mt-3">
+            Данные доступны по {MAX_DATE} включительно — Airflow обрабатывает данные за предыдущий день.
+          </p>
 
           {error && (
             <div className="mt-4 p-3 bg-red-100 text-red-700 rounded text-sm">
