@@ -635,6 +635,8 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Phase 4: forward to upstream API ─────────────────────────────────────
+	// All /api/* requests go to reports-api (Go).
+	// reports-api orchestrates internally: ClickHouse data → pdf-service render.
 	upstreamPath := strings.TrimPrefix(r.URL.Path, "/api")
 	upstreamURL := strings.TrimRight(s.cfg.apiURL, "/") + upstreamPath
 	if r.URL.RawQuery != "" {

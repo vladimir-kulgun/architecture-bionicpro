@@ -28,6 +28,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // ── Configuration ──────────────────────────────────────────────────────────────
@@ -46,6 +50,12 @@ type config struct {
 	listenAddr    string
 	clickhouseURL string
 	frontendURL   string
+	pdfServiceURL string // pdf-service renders JSON → PDF
+	s3Endpoint    string // MinIO/S3 host:port, e.g. minio:9000
+	s3Bucket      string // bucket for cached PDFs
+	s3AccessKey   string
+	s3SecretKey   string
+	cdnURL        string // public base URL of the CDN (Nginx proxy), e.g. http://localhost:9080
 }
 
 func loadConfig() config {
@@ -53,6 +63,12 @@ func loadConfig() config {
 		listenAddr:    ":" + getenv("PORT", "8000"),
 		clickhouseURL: getenv("CLICKHOUSE_URL", "http://clickhouse:8123"),
 		frontendURL:   getenv("FRONTEND_URL", "http://localhost:3000"),
+		pdfServiceURL: getenv("PDF_SERVICE_URL", "http://pdf-service:5501"),
+		s3Endpoint:    getenv("S3_ENDPOINT", ""),
+		s3Bucket:      getenv("S3_BUCKET", "reports"),
+		s3AccessKey:   getenv("S3_ACCESS_KEY", ""),
+		s3SecretKey:   getenv("S3_SECRET_KEY", ""),
+		cdnURL:        getenv("CDN_URL", "http://localhost:9080"),
 	}
 }
 
@@ -209,10 +225,48 @@ type UserReport struct {
 type server struct {
 	cfg config
 	log *slog.Logger
+	s3  *minio.Client // nil when S3 is not configured
 }
 
 func newServer(cfg config) *server {
-	return &server{cfg: cfg, log: slog.Default()}
+	srv := &server{cfg: cfg, log: slog.Default()}
+	if cfg.s3Endpoint != "" && cfg.s3AccessKey != "" {
+		mc, err := minio.New(cfg.s3Endpoint, &minio.Options{
+			Creds:  credentials.NewStaticV4(cfg.s3AccessKey, cfg.s3SecretKey, ""),
+			Secure: false,
+		})
+		if err != nil {
+			slog.Warn("minio init failed, S3 cache disabled", "err", err)
+		} else {
+			srv.s3 = mc
+			srv.ensureS3Bucket()
+		}
+	}
+	return srv
+}
+
+// ensureS3Bucket creates the PDF cache bucket if it does not yet exist and
+// sets a public-read policy so Nginx can proxy objects without credentials.
+func (s *server) ensureS3Bucket() {
+	ctx := context.Background()
+	exists, err := s.s3.BucketExists(ctx, s.cfg.s3Bucket)
+	if err != nil {
+		s.log.Warn("s3 BucketExists failed", "err", err)
+		return
+	}
+	if !exists {
+		if err := s.s3.MakeBucket(ctx, s.cfg.s3Bucket, minio.MakeBucketOptions{}); err != nil {
+			s.log.Warn("s3 MakeBucket failed", "err", err)
+			return
+		}
+		s.log.Info("s3 bucket created", "bucket", s.cfg.s3Bucket)
+	}
+
+	// Allow anonymous GET so Nginx CDN can proxy without S3 credentials.
+	policy := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::` + s.cfg.s3Bucket + `/*"]}]}`
+	if err := s.s3.SetBucketPolicy(ctx, s.cfg.s3Bucket, policy); err != nil {
+		s.log.Warn("s3 SetBucketPolicy failed", "err", err)
+	}
 }
 
 // ── Middleware ─────────────────────────────────────────────────────────────────
@@ -319,9 +373,9 @@ func (s *server) handleAdminGetReport(w http.ResponseWriter, r *http.Request) {
 	s.serveReport(w, r, targetUserID, from, to)
 }
 
-// serveReport is the shared implementation used by both handlers.
-// It queries ClickHouse and writes the JSON response.
-func (s *server) serveReport(w http.ResponseWriter, r *http.Request, userID, from, to string) {
+// fetchReport queries ClickHouse and assembles a UserReport.
+// It is the single source of report data, shared by the JSON and PDF handlers.
+func (s *server) fetchReport(userID, from, to string) (*UserReport, error) {
 	// FINAL forces ReplacingMergeTree deduplication before the query runs,
 	// guaranteeing that the client always receives the latest ETL version of
 	// each (user_id, report_date) pair even when background merges are pending.
@@ -355,9 +409,7 @@ FORMAT JSONEachRow`,
 
 	body, err := chQuery(s.cfg.clickhouseURL, sql)
 	if err != nil {
-		s.log.Error("clickhouse query failed", "user_id", userID, "err", err)
-		http.Error(w, "failed to fetch report data", http.StatusInternalServerError)
-		return
+		return nil, fmt.Errorf("clickhouse: %w", err)
 	}
 
 	// ClickHouse JSONEachRow: one JSON object per newline.
@@ -376,7 +428,17 @@ FORMAT JSONEachRow`,
 		rows = append(rows, row)
 	}
 
-	report := buildReport(userID, from, to, rows)
+	return buildReport(userID, from, to, rows), nil
+}
+
+// serveReport fetches data from ClickHouse and writes a JSON response.
+func (s *server) serveReport(w http.ResponseWriter, r *http.Request, userID, from, to string) {
+	report, err := s.fetchReport(userID, from, to)
+	if err != nil {
+		s.log.Error("clickhouse query failed", "user_id", userID, "err", err)
+		http.Error(w, "failed to fetch report data", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(report); err != nil {
@@ -386,9 +448,122 @@ FORMAT JSONEachRow`,
 	s.log.Info("report served",
 		"user_id", userID,
 		"from", from, "to", to,
-		"rows", len(rows),
+		"rows", len(report.DailyReports),
 		"requester", r.Header.Get("X-JWT-Sub"),
 	)
+}
+
+// GET /reports/me/pdf?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Returns a CDN URL for the user's PDF report.
+// Cache flow:
+//   1. StatObject — if present in S3, return CDN URL immediately (no ClickHouse hit).
+//   2. Cache miss — fetchReport (ClickHouse) → pdf-service/render → PutObject → return CDN URL.
+//
+// The CDN (Nginx) reverse-proxies MinIO and caches responses, so repeated
+// downloads of the same URL don't reach MinIO either.
+// Required role: prothetic_user OR administrator.
+func (s *server) handleMyReportPDF(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-JWT-Sub")
+
+	if !hasRole(r, "prothetic_user") && !hasRole(r, "administrator") {
+		http.Error(w, "forbidden: prothetic_user or administrator role required", http.StatusForbidden)
+		return
+	}
+
+	from, to, ok := parseDateRange(w, r)
+	if !ok {
+		return
+	}
+
+	// Cache key is stable for a given user + date range (historical data is immutable).
+	cacheKey := fmt.Sprintf("reports/%s/%s_%s.pdf", userID, from, to)
+
+	// S3+CDN path: check cache, generate on miss, always return a URL.
+	if s.s3 != nil {
+		cdnFileURL := strings.TrimRight(s.cfg.cdnURL, "/") + "/" + s.cfg.s3Bucket + "/" + cacheKey
+
+		// Cache hit: object already in S3 — skip ClickHouse and pdf-service entirely.
+		_, err := s.s3.StatObject(r.Context(), s.cfg.s3Bucket, cacheKey, minio.StatObjectOptions{})
+		if err == nil {
+			s.log.Info("pdf cache hit", "user_id", userID, "key", cacheKey)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"url": cdnFileURL}) //nolint:errcheck
+			return
+		}
+
+		// Cache miss: generate PDF and upload synchronously before returning the URL.
+		pdfBytes, genErr := s.generatePDF(r.Context(), userID, from, to)
+		if genErr != nil {
+			s.log.Error("generate pdf", "user_id", userID, "err", genErr)
+			http.Error(w, genErr.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		filename := fmt.Sprintf("report_%s_%s.pdf", from, to)
+		_, err = s.s3.PutObject(r.Context(), s.cfg.s3Bucket, cacheKey,
+			bytes.NewReader(pdfBytes), int64(len(pdfBytes)),
+			minio.PutObjectOptions{
+				ContentType:        "application/pdf",
+				ContentDisposition: `attachment; filename="` + filename + `"`,
+			})
+		if err != nil {
+			s.log.Error("s3 upload failed", "key", cacheKey, "err", err)
+			http.Error(w, "failed to store report", http.StatusInternalServerError)
+			return
+		}
+
+		s.log.Info("pdf uploaded to s3", "user_id", userID, "key", cacheKey)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"url": cdnFileURL}) //nolint:errcheck
+		return
+	}
+
+	// Fallback when S3 is not configured: stream the PDF directly.
+	pdfBytes, err := s.generatePDF(r.Context(), userID, from, to)
+	if err != nil {
+		s.log.Error("generate pdf (no s3)", "user_id", userID, "err", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	filename := fmt.Sprintf("report_%s_%s.pdf", from, to)
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Write(pdfBytes) //nolint:errcheck
+	s.log.Info("pdf streamed directly (no s3)", "user_id", userID, "from", from, "to", to)
+}
+
+// generatePDF fetches report data from ClickHouse and renders it via pdf-service.
+func (s *server) generatePDF(ctx context.Context, userID, from, to string) ([]byte, error) {
+	report, err := s.fetchReport(userID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("fetch report: %w", err)
+	}
+
+	jsonBody, err := json.Marshal(report)
+	if err != nil {
+		return nil, fmt.Errorf("encode report: %w", err)
+	}
+
+	pdfURL := strings.TrimRight(s.cfg.pdfServiceURL, "/") + "/render"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pdfURL, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("build pdf request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("pdf service unavailable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("pdf generation failed (%d): %s", resp.StatusCode, body)
+	}
+
+	return io.ReadAll(resp.Body)
 }
 
 // GET /health — liveness probe for Docker / load balancers.
@@ -537,9 +712,12 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// Self-service: user_id is taken from JWT sub, never from the URL.
+	// Self-service JSON: user_id is taken from JWT sub, never from the URL.
 	// Any authenticated user with prothetic_user or administrator role can call this.
 	mux.HandleFunc("GET /reports/me", srv.requireAuth(srv.handleMyReport))
+
+	// Self-service PDF: orchestrates ClickHouse → pdf-service → PDF stream.
+	mux.HandleFunc("GET /reports/me/pdf", srv.requireAuth(srv.handleMyReportPDF))
 
 	// Admin lookup: requires administrator role (enforced by requireAdmin middleware).
 	// prothetic_user gets 403 before the handler runs, regardless of the user_id value.
