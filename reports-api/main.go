@@ -11,9 +11,18 @@
 //   JWT claims (sub, realm_access.roles) without re-verifying the signature,
 //   trusting the upstream BFF as the auth boundary.
 //
-// RBAC:
-//   prothetic_user — may only fetch their own report (JWT sub == user_id)
-//   administrator  — may fetch any user's report
+// Access control — two separate routes with different trust models:
+//
+//   GET /reports/me              — self-service; user_id is always taken from the
+//                                  JWT sub claim, never from the URL. IDOR is
+//                                  architecturally impossible on this route.
+//                                  Required role: prothetic_user OR administrator.
+//
+//   GET /reports/{user_id}       — admin lookup; allows fetching any user's report.
+//                                  Required role: administrator (enforced by
+//                                  requireAdmin middleware before the handler runs).
+//                                  prothetic_user receives 403 even if they happen
+//                                  to know another user's Keycloak ID.
 package main
 
 import (
@@ -78,7 +87,7 @@ func (c *jwtClaims) hasRole(role string) bool {
 // is responsible for validating tokens against Keycloak before proxying.
 func parseJWT(authHeader string) (*jwtClaims, error) {
 	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == authHeader { // no "Bearer " prefix
+	if token == authHeader {
 		return nil, fmt.Errorf("missing Bearer prefix")
 	}
 
@@ -87,15 +96,15 @@ func parseJWT(authHeader string) (*jwtClaims, error) {
 		return nil, fmt.Errorf("malformed JWT: expected 3 parts, got %d", len(parts))
 	}
 
-	// JWT payload is the second segment (base64url, no padding).
+	// JWT payload is the second segment, base64url-encoded with no padding.
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("base64 decode payload: %w", err)
+		return nil, fmt.Errorf("base64 decode: %w", err)
 	}
 
 	var claims jwtClaims
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, fmt.Errorf("unmarshal claims: %w", err)
+		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	if claims.Sub == "" {
 		return nil, fmt.Errorf("JWT missing 'sub' claim")
@@ -106,7 +115,7 @@ func parseJWT(authHeader string) (*jwtClaims, error) {
 // ── ClickHouse client ──────────────────────────────────────────────────────────
 
 // chQuery sends SQL to ClickHouse via HTTP POST and returns the raw response.
-// The query should end with "FORMAT JSONEachRow" for SELECT statements.
+// SELECT queries should end with "FORMAT JSONEachRow".
 func chQuery(chURL, sql string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, chURL, strings.NewReader(sql))
 	if err != nil {
@@ -116,7 +125,7 @@ func chQuery(chURL, sql string) ([]byte, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("clickhouse request: %w", err)
+		return nil, fmt.Errorf("clickhouse: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -130,7 +139,7 @@ func chQuery(chURL, sql string) ([]byte, error) {
 // ── Domain types ───────────────────────────────────────────────────────────────
 
 // chRow mirrors the columns of user_prosthetics_report as returned by
-// ClickHouse JSONEachRow format. Field names must match column/alias names.
+// ClickHouse FORMAT JSONEachRow. JSON tag names must match column/alias names.
 type chRow struct {
 	UserID           string  `json:"user_id"`
 	ReportDate       string  `json:"report_date"`
@@ -153,25 +162,25 @@ type chRow struct {
 
 // DailyReport is one row in the report's timeline.
 type DailyReport struct {
-	Date              string  `json:"date"`
-	TotalSessions     uint32  `json:"total_sessions"`
-	TotalActiveMinutes uint32 `json:"total_active_minutes"`
-	AvgSignalStrength float32 `json:"avg_signal_strength_mv"`
-	MaxSignalStrength float32 `json:"max_signal_strength_mv"`
-	MovementCount     uint32  `json:"movement_count"`
-	ErrorCount        uint32  `json:"error_count"`
-	AvgBatteryLevel   float32 `json:"avg_battery_level_pct"`
-	MinBatteryLevel   float32 `json:"min_battery_level_pct"`
+	Date               string  `json:"date"`
+	TotalSessions      uint32  `json:"total_sessions"`
+	TotalActiveMinutes uint32  `json:"total_active_minutes"`
+	AvgSignalStrength  float32 `json:"avg_signal_strength_mv"`
+	MaxSignalStrength  float32 `json:"max_signal_strength_mv"`
+	MovementCount      uint32  `json:"movement_count"`
+	ErrorCount         uint32  `json:"error_count"`
+	AvgBatteryLevel    float32 `json:"avg_battery_level_pct"`
+	MinBatteryLevel    float32 `json:"min_battery_level_pct"`
 }
 
 // Summary contains aggregated metrics across the entire requested period.
 type Summary struct {
-	TotalDaysActive   int     `json:"total_days_active"`
-	TotalActiveMinutes uint32 `json:"total_active_minutes"`
-	TotalMovements    uint32  `json:"total_movements"`
-	TotalErrors       uint32  `json:"total_errors"`
-	AvgSignalStrength float32 `json:"avg_signal_strength_mv"`
-	AvgBatteryLevel   float32 `json:"avg_battery_level_pct"`
+	TotalDaysActive    int     `json:"total_days_active"`
+	TotalActiveMinutes uint32  `json:"total_active_minutes"`
+	TotalMovements     uint32  `json:"total_movements"`
+	TotalErrors        uint32  `json:"total_errors"`
+	AvgSignalStrength  float32 `json:"avg_signal_strength_mv"`
+	AvgBatteryLevel    float32 `json:"avg_battery_level_pct"`
 }
 
 // Period holds the report's time window as ISO-8601 date strings.
@@ -180,7 +189,7 @@ type Period struct {
 	To   string `json:"to"`
 }
 
-// UserReport is the top-level API response for GET /reports/{user_id}.
+// UserReport is the top-level API response for both /reports/me and /reports/{user_id}.
 type UserReport struct {
 	UserID           string        `json:"user_id"`
 	FirstName        string        `json:"first_name"`
@@ -206,75 +215,116 @@ func newServer(cfg config) *server {
 	return &server{cfg: cfg, log: slog.Default()}
 }
 
+// ── Middleware ─────────────────────────────────────────────────────────────────
+
+// requireAuth parses the Bearer JWT and stores claims in the request header
+// X-JWT-Sub and X-JWT-Roles for downstream handlers. Returns 401 on failure.
+//
+// All protected routes must be wrapped with this middleware before any role check.
+func (s *server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, err := parseJWT(r.Header.Get("Authorization"))
+		if err != nil {
+			s.log.Warn("auth failed", "err", err, "ip", r.RemoteAddr)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Propagate claims to the handler via request headers.
+		// This avoids context values and keeps the chain explicit.
+		r.Header.Set("X-JWT-Sub", claims.Sub)
+		r.Header.Set("X-JWT-Username", claims.PreferredUsername)
+		r.Header.Set("X-JWT-Roles", strings.Join(claims.RealmAccess.Roles, ","))
+		next(w, r)
+	}
+}
+
+// requireAdmin wraps requireAuth and additionally enforces the administrator role.
+// Returns 403 if the authenticated user lacks the role.
+//
+// Usage: mux.HandleFunc("GET /reports/{user_id}", srv.requireAdmin(srv.handleAdminGetReport))
+func (s *server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		if !hasRole(r, "administrator") {
+			s.log.Warn("admin route accessed without role",
+				"sub", r.Header.Get("X-JWT-Sub"),
+				"path", r.URL.Path,
+			)
+			http.Error(w, "forbidden: administrator role required", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	})
+}
+
+// hasRole checks whether the X-JWT-Roles header (set by requireAuth) contains role.
+func hasRole(r *http.Request, role string) bool {
+	for _, v := range strings.Split(r.Header.Get("X-JWT-Roles"), ",") {
+		if strings.TrimSpace(v) == role {
+			return true
+		}
+	}
+	return false
+}
+
 // ── Handlers ───────────────────────────────────────────────────────────────────
 
-// GET /reports/{user_id}?from=YYYY-MM-DD&to=YYYY-MM-DD
+// GET /reports/me?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
-// Returns the pre-computed prosthetics usage report for user_id.
-// Data is read directly from the ClickHouse data mart — no real-time
-// aggregation is performed at query time.
+// Self-service endpoint: always returns the authenticated user's own report.
+// The user_id is taken exclusively from the JWT sub claim — the URL carries
+// no identifier, so there is no parameter to forge (IDOR is impossible).
 //
-// Query parameters:
-//
-//	from  YYYY-MM-DD  start of period (default: 30 days ago)
-//	to    YYYY-MM-DD  end of period   (default: yesterday)
-func (s *server) handleGetReport(w http.ResponseWriter, r *http.Request) {
-	// ── Step 1: authenticate ─────────────────────────────────────────────────
-	claims, err := parseJWT(r.Header.Get("Authorization"))
-	if err != nil {
-		s.log.Warn("auth failed", "err", err, "ip", r.RemoteAddr)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+// Required role: prothetic_user OR administrator (any authenticated user).
+func (s *server) handleMyReport(w http.ResponseWriter, r *http.Request) {
+	// user_id is always the caller's own Keycloak subject — never from the URL.
+	userID := r.Header.Get("X-JWT-Sub")
+
+	if !hasRole(r, "prothetic_user") && !hasRole(r, "administrator") {
+		http.Error(w, "forbidden: prothetic_user or administrator role required", http.StatusForbidden)
 		return
 	}
 
-	// ── Step 2: extract path variable {user_id} ──────────────────────────────
+	from, to, ok := parseDateRange(w, r)
+	if !ok {
+		return
+	}
+
+	s.serveReport(w, r, userID, from, to)
+}
+
+// GET /reports/{user_id}?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Admin lookup: allows fetching any user's report by their Keycloak ID.
+// This handler is only reachable through the requireAdmin middleware, which
+// returns 403 before this code runs if the caller lacks the administrator role.
+//
+// Required role: administrator (enforced by middleware, not by this handler).
+func (s *server) handleAdminGetReport(w http.ResponseWriter, r *http.Request) {
 	targetUserID := r.PathValue("user_id")
 	if targetUserID == "" {
 		http.Error(w, "missing user_id path parameter", http.StatusBadRequest)
 		return
 	}
 
-	// ── Step 3: RBAC ─────────────────────────────────────────────────────────
-	isAdmin := claims.hasRole("administrator")
-	isProthUser := claims.hasRole("prothetic_user")
-
-	switch {
-	case !isAdmin && !isProthUser:
-		http.Error(w, "forbidden: role prothetic_user or administrator required", http.StatusForbidden)
-		return
-	case isProthUser && !isAdmin && claims.Sub != targetUserID:
-		// prothetic_user may only see their own data
-		s.log.Warn("RBAC: user_id mismatch",
-			"sub", claims.Sub[:8], "requested", targetUserID[:min(8, len(targetUserID))])
-		http.Error(w, "forbidden: you may only access your own report", http.StatusForbidden)
+	from, to, ok := parseDateRange(w, r)
+	if !ok {
 		return
 	}
 
-	// ── Step 4: parse date range ──────────────────────────────────────────────
-	now := time.Now().UTC()
-	fromDate := now.AddDate(0, 0, -30).Format("2006-01-02")
-	toDate := now.AddDate(0, 0, -1).Format("2006-01-02")
+	s.log.Info("admin report lookup",
+		"admin_sub", r.Header.Get("X-JWT-Sub"),
+		"target_user_id", targetUserID,
+	)
 
-	if v := r.URL.Query().Get("from"); v != "" {
-		if _, err := time.Parse("2006-01-02", v); err != nil {
-			http.Error(w, "'from' must be YYYY-MM-DD", http.StatusBadRequest)
-			return
-		}
-		fromDate = v
-	}
-	if v := r.URL.Query().Get("to"); v != "" {
-		if _, err := time.Parse("2006-01-02", v); err != nil {
-			http.Error(w, "'to' must be YYYY-MM-DD", http.StatusBadRequest)
-			return
-		}
-		toDate = v
-	}
+	s.serveReport(w, r, targetUserID, from, to)
+}
 
-	// ── Step 5: query ClickHouse ──────────────────────────────────────────────
-	//
-	// FINAL forces ReplacingMergeTree deduplication so the client always gets
-	// the latest version of each (user_id, report_date) row, even when
-	// background merges haven't completed yet.
+// serveReport is the shared implementation used by both handlers.
+// It queries ClickHouse and writes the JSON response.
+func (s *server) serveReport(w http.ResponseWriter, r *http.Request, userID, from, to string) {
+	// FINAL forces ReplacingMergeTree deduplication before the query runs,
+	// guaranteeing that the client always receives the latest ETL version of
+	// each (user_id, report_date) pair even when background merges are pending.
 	sql := fmt.Sprintf(`
 SELECT
     user_id,
@@ -298,19 +348,19 @@ WHERE user_id     = '%s'
   AND report_date <= '%s'
 ORDER BY report_date
 FORMAT JSONEachRow`,
-		escapeString(targetUserID),
-		fromDate,
-		toDate,
+		escapeString(userID),
+		from,
+		to,
 	)
 
 	body, err := chQuery(s.cfg.clickhouseURL, sql)
 	if err != nil {
-		s.log.Error("clickhouse query failed", "user_id", targetUserID, "err", err)
+		s.log.Error("clickhouse query failed", "user_id", userID, "err", err)
 		http.Error(w, "failed to fetch report data", http.StatusInternalServerError)
 		return
 	}
 
-	// ── Step 6: parse JSONEachRow (one JSON object per newline) ──────────────
+	// ClickHouse JSONEachRow: one JSON object per newline.
 	var rows []chRow
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
@@ -320,14 +370,13 @@ FORMAT JSONEachRow`,
 		}
 		var row chRow
 		if err := json.Unmarshal(line, &row); err != nil {
-			s.log.Error("parse clickhouse row", "err", err, "line", string(line))
+			s.log.Error("parse row", "err", err)
 			continue
 		}
 		rows = append(rows, row)
 	}
 
-	// ── Step 7: build and return response ────────────────────────────────────
-	report := buildReport(targetUserID, fromDate, toDate, rows)
+	report := buildReport(userID, from, to, rows)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(report); err != nil {
@@ -335,11 +384,44 @@ FORMAT JSONEachRow`,
 	}
 
 	s.log.Info("report served",
-		"user_id", targetUserID,
-		"from", fromDate, "to", toDate,
+		"user_id", userID,
+		"from", from, "to", to,
 		"rows", len(rows),
-		"requester", claims.Sub,
+		"requester", r.Header.Get("X-JWT-Sub"),
 	)
+}
+
+// GET /health — liveness probe for Docker / load balancers.
+func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+// parseDateRange reads optional ?from and ?to query params (YYYY-MM-DD).
+// Defaults: from = 30 days ago, to = yesterday.
+// Returns (from, to, true) on success; writes a 400 and returns false on bad input.
+func parseDateRange(w http.ResponseWriter, r *http.Request) (from, to string, ok bool) {
+	now := time.Now().UTC()
+	from = now.AddDate(0, 0, -30).Format("2006-01-02")
+	to = now.AddDate(0, 0, -1).Format("2006-01-02")
+
+	if v := r.URL.Query().Get("from"); v != "" {
+		if _, err := time.Parse("2006-01-02", v); err != nil {
+			http.Error(w, "'from' must be YYYY-MM-DD", http.StatusBadRequest)
+			return "", "", false
+		}
+		from = v
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if _, err := time.Parse("2006-01-02", v); err != nil {
+			http.Error(w, "'to' must be YYYY-MM-DD", http.StatusBadRequest)
+			return "", "", false
+		}
+		to = v
+	}
+	return from, to, true
 }
 
 // buildReport assembles a UserReport from raw ClickHouse rows.
@@ -350,8 +432,7 @@ func buildReport(userID, from, to string, rows []chRow) *UserReport {
 		DailyReports: make([]DailyReport, 0, len(rows)),
 	}
 
-	// Profile fields are constant across all rows for the same user_id;
-	// take them from the first row.
+	// Profile fields are constant across rows for the same user_id.
 	if len(rows) > 0 {
 		r0 := rows[0]
 		report.FirstName = r0.FirstName
@@ -363,7 +444,6 @@ func buildReport(userID, from, to string, rows []chRow) *UserReport {
 		report.LastServiceDate = r0.LastServiceDate
 	}
 
-	// Accumulate summary values while building the daily list.
 	var (
 		sumSignal  float64
 		sumBattery float64
@@ -385,7 +465,6 @@ func buildReport(userID, from, to string, rows []chRow) *UserReport {
 			AvgBatteryLevel:    row.AvgBattery,
 			MinBatteryLevel:    row.MinBattery,
 		})
-
 		sumActive += row.TotalActiveMin
 		sumMove += row.MovementCount
 		sumErr += row.ErrorCount
@@ -409,8 +488,6 @@ func buildReport(userID, from, to string, rows []chRow) *UserReport {
 	return report
 }
 
-// round2 computes the arithmetic mean of sum/n, rounded to 2 decimal places.
-// Returns 0 when n == 0 to avoid division by zero.
 func round2(sum float64, n int) float32 {
 	if n == 0 {
 		return 0
@@ -419,24 +496,10 @@ func round2(sum float64, n int) float32 {
 }
 
 // escapeString prevents SQL injection by escaping single-quote characters.
+// user_id values come from JWT sub claims (Keycloak UUIDs), so in practice
+// they never contain quotes; this is a defence-in-depth measure.
 func escapeString(s string) string {
 	return strings.ReplaceAll(s, "'", "\\'")
-}
-
-// min returns the smaller of two ints (backport for Go < 1.21 compat).
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// GET /health
-//
-// Lightweight liveness probe used by Docker and load balancers.
-func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
 }
 
 // ── CORS middleware ────────────────────────────────────────────────────────────
@@ -463,11 +526,15 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// GET /reports/{user_id}          — full report (last 30 days default)
-	// GET /reports/{user_id}?from=&to= — report for a custom date range
-	mux.HandleFunc("GET /reports/{user_id}", srv.handleGetReport)
+	// Self-service: user_id is taken from JWT sub, never from the URL.
+	// Any authenticated user with prothetic_user or administrator role can call this.
+	mux.HandleFunc("GET /reports/me", srv.requireAuth(srv.handleMyReport))
 
-	// GET /health  — liveness probe
+	// Admin lookup: requires administrator role (enforced by requireAdmin middleware).
+	// prothetic_user gets 403 before the handler runs, regardless of the user_id value.
+	mux.HandleFunc("GET /reports/{user_id}", srv.requireAdmin(srv.handleAdminGetReport))
+
+	// Liveness probe — no auth required.
 	mux.HandleFunc("GET /health", srv.handleHealth)
 
 	slog.Info("reports-api ready",
