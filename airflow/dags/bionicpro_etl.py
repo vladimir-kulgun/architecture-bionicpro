@@ -1,11 +1,11 @@
 """
 bionicpro_etl.py — Daily ETL pipeline for the BionicPRO reporting data mart.
 
-Pipeline (parallel extraction, then merge):
+Pipeline:
 
-    extract_telemetry ──┐
-                        ├──► refresh_datamart ──► validate_datamart
-    extract_crm       ──┘
+    extract_crm ──► extract_telemetry ──► validate_datamart
+                         ↓ (MV fires on INSERT)
+                    user_prosthetics_report
 
 Sources:
     bionicpro_postgres  (Airflow conn)  app_db  — prosthetics telemetry (PostgreSQL)
@@ -183,6 +183,40 @@ def ch_ensure_tables() -> None:
     SETTINGS index_granularity = 8192
     """)
 
+    # ── Materialized View: staging_telemetry → user_prosthetics_report ──────────
+    #
+    # Fires automatically on every INSERT into staging_telemetry.
+    # At trigger time, JOINs the newly-inserted telemetry batch with the
+    # current state of staging_crm_customers (FINAL forces dedup).
+    #
+    # Prerequisite: extract_crm must run BEFORE extract_telemetry so that
+    # staging_crm_customers is populated when the MV fires.
+    ch_query("""
+    CREATE MATERIALIZED VIEW IF NOT EXISTS mv_datamart_report
+    TO user_prosthetics_report AS
+    SELECT
+        t.user_id,
+        t.report_date,
+        coalesce(c.first_name,        '') AS first_name,
+        coalesce(c.last_name,         '') AS last_name,
+        coalesce(c.email,             '') AS email,
+        coalesce(c.prosthetics_model, '') AS prosthetics_model,
+        coalesce(c.order_date,        '') AS order_date,
+        coalesce(c.delivery_date,     '') AS delivery_date,
+        coalesce(c.last_service_date, '') AS last_service_date,
+        t.total_sessions,
+        t.total_active_min,
+        t.avg_signal    AS avg_signal_strength,
+        t.max_signal    AS max_signal_strength,
+        t.movement_count,
+        t.error_count,
+        t.avg_battery   AS avg_battery_level,
+        t.min_battery   AS min_battery_level,
+        now()           AS etl_updated_at
+    FROM staging_telemetry AS t
+    LEFT JOIN staging_crm_customers AS c ON c.user_id = t.user_id
+    """)
+
     log.info("ClickHouse tables verified / created.")
 
 
@@ -314,50 +348,7 @@ def extract_crm(**_) -> None:
     log.info("extract_crm (clickhouse kafka engine): %d rows written to staging.", count)
 
 
-# ── Task 3: Refresh the data mart from staging ────────────────────────────────
-
-def refresh_datamart(ds: str, **_) -> None:
-    """JOIN staging_telemetry and staging_crm_customers for the target date
-    and insert the result into user_prosthetics_report.
-
-    Uses FINAL modifier on staging reads to force ReplacingMergeTree deduplication
-    before joining, ensuring only the latest version of each row is used.
-    """
-    ch_query(f"""
-    INSERT INTO user_prosthetics_report
-    SELECT
-        t.user_id,
-        t.report_date,
-        -- CRM snapshot (NULL → empty string)
-        coalesce(c.first_name,          '')  AS first_name,
-        coalesce(c.last_name,           '')  AS last_name,
-        coalesce(c.email,               '')  AS email,
-        coalesce(c.prosthetics_model,   '')  AS prosthetics_model,
-        coalesce(c.order_date,          '')  AS order_date,
-        coalesce(c.delivery_date,       '')  AS delivery_date,
-        coalesce(c.last_service_date,   '')  AS last_service_date,
-        -- Telemetry aggregates
-        t.total_sessions,
-        t.total_active_min,
-        t.avg_signal                         AS avg_signal_strength,
-        t.max_signal                         AS max_signal_strength,
-        t.movement_count,
-        t.error_count,
-        t.avg_battery                        AS avg_battery_level,
-        t.min_battery                        AS min_battery_level,
-        now()                                AS etl_updated_at
-    FROM (
-        SELECT * FROM staging_telemetry FINAL
-        WHERE report_date = '{ds}'
-    ) AS t
-    LEFT JOIN (
-        SELECT * FROM staging_crm_customers FINAL
-    ) AS c ON c.user_id = t.user_id
-    """)
-    log.info("refresh_datamart: data mart updated for %s.", ds)
-
-
-# ── Task 4: Validate the data mart ────────────────────────────────────────────
+# ── Task 3: Validate the data mart ────────────────────────────────────────────
 
 def validate_datamart(ds: str, **_) -> None:
     """Sanity checks after each ETL run.
@@ -447,15 +438,6 @@ with DAG(
         ),
     )
 
-    t_refresh_datamart = PythonOperator(
-        task_id="refresh_datamart",
-        python_callable=refresh_datamart,
-        doc_md=(
-            "JOIN telemetry and CRM staging tables for ds and insert "
-            "into the user_prosthetics_report data mart."
-        ),
-    )
-
     t_validate = PythonOperator(
         task_id="validate_datamart",
         python_callable=validate_datamart,
@@ -464,9 +446,10 @@ with DAG(
 
     # Dependency graph:
     #
-    #   extract_telemetry ──┐
-    #                       ├──► refresh_datamart ──► validate_datamart
-    #   extract_crm       ──┘
+    #   extract_crm ──► extract_telemetry ──► validate_datamart
+    #                        ↓ (MV fires on INSERT)
+    #                   user_prosthetics_report
     #
-    # extract_telemetry and extract_crm run in parallel (no dependency between them).
-    [t_extract_telemetry, t_extract_crm] >> t_refresh_datamart >> t_validate
+    # CRM must load before telemetry so that staging_crm_customers is populated
+    # when mv_datamart_report fires on the staging_telemetry INSERT.
+    t_extract_crm >> t_extract_telemetry >> t_validate
