@@ -17,7 +17,7 @@ x-airflow-common:
     AIRFLOW_CONN_BIONICPRO_POSTGRES: postgresql://bionicpro_user:bionicpro_password@app_db:5432/bionicpro
     AIRFLOW_CONN_BIONICPRO_CRM_DB: postgresql://crm_user:crm_password@crm_db:5432/crm
     # Extra Python packages installed at startup
-    _PIP_ADDITIONAL_REQUIREMENTS: "apache-airflow-providers-postgres requests"
+    _PIP_ADDITIONAL_REQUIREMENTS: "apache-airflow-providers-postgres requests kafka-python"
   volumes:
     - ./airflow/dags:/opt/airflow/dags
   depends_on:
@@ -25,6 +25,7 @@ x-airflow-common:
     - app_db
     - crm_db
     - clickhouse
+    - kafka
 
 services:
   openldap:
@@ -60,6 +61,8 @@ services:
       POSTGRES_DB: crm
       POSTGRES_USER: crm_user
       POSTGRES_PASSWORD: crm_password
+    # wal_level=logical is required for Debezium CDC (logical replication slot).
+    command: ["postgres", "-c", "wal_level=logical"]
     volumes:
       - ./postgres-crm-data:/var/lib/postgresql/data
       # CRM schema (customers, orders, service_history) + seed data
@@ -79,6 +82,67 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+
+  # ── Zookeeper — Kafka coordination service ───────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - ./zookeeper-data:/var/lib/zookeeper/data
+      - ./zookeeper-logs:/var/lib/zookeeper/log
+
+  # ── Kafka — message broker for CDC events ─────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - ./kafka-data:/var/lib/kafka/data
+
+  # ── Kafka Connect (Debezium) — CDC connector runtime ─────────────────────────
+  kafka-connect:
+    image: debezium/connect:2.7
+    depends_on:
+      - kafka
+      - crm_db
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: debezium-group
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # JSON without schema — produces flat records after ExtractNewRecordState SMT
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+  # ── connector-init — registers Debezium connector once on startup ─────────────
+  connector-init:
+    image: curlimages/curl:8.6.0
+    depends_on:
+      - kafka-connect
+    volumes:
+      - ./debezium:/debezium:ro
+    entrypoint: ["/bin/sh", "/debezium/register.sh"]
+    restart: "no"
 
   # ── Airflow metadata database ─────────────────────────────────────────────────
   airflow_db:
