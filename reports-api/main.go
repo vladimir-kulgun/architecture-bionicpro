@@ -1,7 +1,9 @@
 // reports-api — BionicPRO reporting backend.
 //
 // Serves pre-computed prosthetics usage reports from the ClickHouse OLAP
-// data mart (table user_prosthetics_report, populated by Airflow ETL).
+// data mart (table user_prosthetics_report, populated by the ClickHouse
+// Materialized View mv_datamart_report that fires on each Airflow ETL insert
+// into staging_telemetry).
 // No real-time computation: every request is a simple point-lookup by
 // user_id + date range on a pre-aggregated table.
 //
@@ -386,7 +388,7 @@ SELECT
     toString(report_date)   AS report_date,
     first_name, last_name, email,
     prosthetics_model,
-    toString(order_date)    AS order_date,
+    order_date,
     delivery_date,
     last_service_date,
     total_sessions,
