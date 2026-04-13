@@ -33,9 +33,8 @@ Idempotency: ClickHouse ReplacingMergeTree(etl_updated_at) deduplicates rows on
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import requests
 from airflow import DAG
@@ -46,14 +45,8 @@ log = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-TELEMETRY_CONN  = "bionicpro_postgres"   # Airflow connection: app_db
-CLICKHOUSE_URL  = "http://clickhouse:8123"
-KAFKA_BOOTSTRAP = "kafka:9092"
-
-# Debezium topic names: {prefix}.{schema}.{table}
-TOPIC_CUSTOMERS    = "crm.public.crm_customers"
-TOPIC_ORDERS       = "crm.public.crm_orders"
-TOPIC_SERVICE_HIST = "crm.public.crm_service_history"
+TELEMETRY_CONN = "bionicpro_postgres"   # Airflow connection: app_db
+CLICKHOUSE_URL = "http://clickhouse:8123"
 
 # ── ClickHouse HTTP helpers ────────────────────────────────────────────────────
 
@@ -249,124 +242,76 @@ def extract_telemetry(ds: str, **_) -> None:
     log.info("extract_telemetry: loaded %d rows for %s.", len(rows), ds)
 
 
-# ── Task 2: Extract CRM data via Kafka CDC → ClickHouse staging ───────────────
-
-def _to_date_str(value) -> str:
-    """Convert a Debezium DATE field to a YYYY-MM-DD string.
-
-    Debezium serialises PostgreSQL DATE as an integer (days since 1970-01-01)
-    when using JsonConverter without schemas. Strings pass through unchanged.
-    """
-    if value is None:
-        return ''
-    if isinstance(value, int):
-        return (date(1970, 1, 1) + timedelta(days=value)).isoformat()
-    return str(value)[:10]
-
-
-def _consume_topic(topic: str) -> dict[int, dict]:
-    """Consume all messages from a Kafka topic and return the latest state per record.
-
-    Uses group_id=None (no committed offsets) so every call reads the full
-    topic history from the beginning and rebuilds the current snapshot.
-    consumer_timeout_ms stops iteration after 5 s of no new messages.
-    """
-    from kafka import KafkaConsumer  # imported here to avoid import-time errors
-
-    consumer = KafkaConsumer(
-        topic,
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        auto_offset_reset="earliest",
-        enable_auto_commit=False,
-        group_id=None,          # stateless — always replay from the start
-        consumer_timeout_ms=5_000,
-        value_deserializer=lambda b: json.loads(b.decode()) if b else None,
-    )
-    records: dict[int, dict] = {}
-    for msg in consumer:
-        payload = msg.value
-        if payload is None:             # tombstone — skip
-            continue
-        rec_id = payload.get("id")
-        if rec_id is None:
-            continue
-        if payload.get("__deleted") is True:
-            records.pop(rec_id, None)   # DELETE event — remove from snapshot
-        else:
-            records[rec_id] = payload   # INSERT / UPDATE / initial snapshot
-    consumer.close()
-    log.info("_consume_topic: %s — %d live records.", topic, len(records))
-    return records
-
+# ── Task 2: Refresh CRM staging from ClickHouse raw CDC tables ────────────────
 
 def extract_crm(**_) -> None:
-    """Build the CRM customer snapshot from Kafka CDC topics (Debezium).
+    """Rebuild staging_crm_customers by joining raw CDC tables in ClickHouse.
 
-    Instead of querying crm_db directly (which caused OLTP contention),
-    this task consumes the Debezium change-event topics for crm_customers,
-    crm_orders, and crm_service_history, then reconstructs the same JOIN
-    result in Python and loads it to staging_crm_customers in ClickHouse.
+    Data flow (no Airflow↔Kafka connection required):
+        crm_db → Debezium → Kafka topics
+                                  ↓  (Kafka Engine + Materialized Views, continuous)
+                             raw_crm_customers   (ReplacingMergeTree)
+                             raw_crm_orders      (ReplacingMergeTree)
+                             raw_crm_service_history (ReplacingMergeTree)
+                                  ↓  (this task: SQL JOIN inside ClickHouse)
+                             staging_crm_customers
 
-    No connection to crm_db is made; bulk-read load on the CRM database
-    is eliminated entirely.
+    crm_db receives zero bulk-read load from ETL.
+    The raw_crm_* tables are populated continuously by ClickHouse Kafka Engine
+    as Debezium streams WAL events — this task only runs the final JOIN.
+
+    DATE conversion: Debezium encodes PostgreSQL DATE as integer (days since
+    1970-01-01); addDays(toDate('1970-01-01'), N) converts back to a date string.
     """
     ch_ensure_tables()
 
-    customers   = _consume_topic(TOPIC_CUSTOMERS)
-    orders      = _consume_topic(TOPIC_ORDERS)
-    svc_history = _consume_topic(TOPIC_SERVICE_HIST)
+    ch_query("""
+    INSERT INTO staging_crm_customers
+    SELECT
+        c.keycloak_id                                                       AS user_id,
+        c.first_name,
+        c.last_name,
+        c.email,
+        coalesce(nullIf(o.prosthetics_model, ''), 'Unknown')                AS prosthetics_model,
+        if(o.order_date > 0,
+           toString(addDays(toDate('1970-01-01'), o.order_date)),    '')     AS order_date,
+        if(isNotNull(o.delivery_date) AND o.delivery_date > 0,
+           toString(addDays(toDate('1970-01-01'), o.delivery_date)), '')     AS delivery_date,
+        coalesce(s.last_service_date, '')                                   AS last_service_date,
+        now()                                                               AS loaded_at
+    FROM (
+        -- Latest live state of each customer
+        SELECT id, keycloak_id, first_name, last_name, email
+        FROM   raw_crm_customers FINAL
+        WHERE  __deleted = 0 AND keycloak_id != ''
+    ) AS c
+    LEFT JOIN (
+        -- Latest order per customer (highest order_date wins)
+        SELECT
+            customer_id,
+            argMax(id,                order_date) AS id,
+            argMax(prosthetics_model, order_date) AS prosthetics_model,
+            argMax(order_date,        order_date) AS order_date,
+            argMax(delivery_date,     order_date) AS delivery_date
+        FROM   raw_crm_orders FINAL
+        WHERE  __deleted = 0
+        GROUP BY customer_id
+    ) AS o ON o.customer_id = c.id
+    LEFT JOIN (
+        -- Latest service event per order
+        SELECT
+            order_id,
+            toString(addDays(toDate('1970-01-01'), max(service_date))) AS last_service_date
+        FROM   raw_crm_service_history FINAL
+        WHERE  __deleted = 0
+        GROUP BY order_id
+    ) AS s ON s.order_id = o.id
+    """)
 
-    # Latest order per customer_id (mirrors ORDER BY order_date DESC LIMIT 1).
-    latest_order: dict[int, dict] = {}
-    for o in orders.values():
-        cid = o.get("customer_id")
-        if cid is None:
-            continue
-        prev = latest_order.get(cid)
-        if prev is None or (
-            _to_date_str(o.get("order_date")) >= _to_date_str(prev.get("order_date"))
-        ):
-            latest_order[cid] = o
-
-    # Latest service_date per order_id (mirrors MAX(service_date)).
-    last_service: dict[int, str] = {}
-    for s in svc_history.values():
-        oid = s.get("order_id")
-        if oid is None:
-            continue
-        sd = _to_date_str(s.get("service_date"))
-        if sd > last_service.get(oid, ""):
-            last_service[oid] = sd
-
-    rows = []
-    for c in customers.values():
-        if not c.get("keycloak_id"):
-            continue
-        o   = latest_order.get(c.get("id"), {})
-        oid = o.get("id")
-        rows.append([
-            c.get("keycloak_id", ""),
-            c.get("first_name",  ""),
-            c.get("last_name",   ""),
-            c.get("email",       ""),
-            o.get("prosthetics_model") or "Unknown",
-            _to_date_str(o.get("order_date")),
-            _to_date_str(o.get("delivery_date")),
-            last_service.get(oid, ""),
-        ])
-
-    if not rows:
-        log.warning("extract_crm (kafka): no CRM events found in Kafka topics.")
-        return
-
-    ch_insert(
-        "INSERT INTO staging_crm_customers "
-        "(user_id, first_name, last_name, email, prosthetics_model, "
-        " order_date, delivery_date, last_service_date) "
-        "FORMAT TSV",
-        rows,
-    )
-    log.info("extract_crm (kafka): loaded %d customer rows.", len(rows))
+    count = int(ch_query(
+        "SELECT count() FROM staging_crm_customers FINAL WHERE loaded_at >= now() - INTERVAL 1 MINUTE"
+    ))
+    log.info("extract_crm (clickhouse kafka engine): %d rows written to staging.", count)
 
 
 # ── Task 3: Refresh the data mart from staging ────────────────────────────────
@@ -496,9 +441,9 @@ with DAG(
         task_id="extract_crm",
         python_callable=extract_crm,
         doc_md=(
-            "Consume CRM change events from Kafka (Debezium CDC) and write "
-            "the current customer snapshot to ClickHouse staging_crm_customers. "
-            "Does NOT query crm_db directly — eliminates bulk-read OLTP contention."
+            "JOIN raw_crm_* tables (populated by ClickHouse Kafka Engine from Debezium topics) "
+            "and write the result to staging_crm_customers. "
+            "Does NOT query crm_db — zero bulk-read load on CRM OLTP."
         ),
     )
 

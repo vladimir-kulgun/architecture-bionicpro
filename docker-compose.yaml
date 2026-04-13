@@ -17,7 +17,7 @@ x-airflow-common:
     AIRFLOW_CONN_BIONICPRO_POSTGRES: postgresql://bionicpro_user:bionicpro_password@app_db:5432/bionicpro
     AIRFLOW_CONN_BIONICPRO_CRM_DB: postgresql://crm_user:crm_password@crm_db:5432/crm
     # Extra Python packages installed at startup
-    _PIP_ADDITIONAL_REQUIREMENTS: "apache-airflow-providers-postgres requests kafka-python"
+    _PIP_ADDITIONAL_REQUIREMENTS: "apache-airflow-providers-postgres requests"
   volumes:
     - ./airflow/dags:/opt/airflow/dags
   depends_on:
@@ -25,7 +25,6 @@ x-airflow-common:
     - app_db
     - crm_db
     - clickhouse
-    - kafka
 
 services:
   openldap:
@@ -78,6 +77,8 @@ services:
       - "9000:9000"   # Native TCP client (optional, for clickhouse-client CLI)
     volumes:
       - ./clickhouse-data:/var/lib/clickhouse
+      # Kafka Engine tables + Materialized Views — executed on first container start
+      - ./clickhouse-init:/docker-entrypoint-initdb.d:ro
     ulimits:
       nofile:
         soft: 262144
