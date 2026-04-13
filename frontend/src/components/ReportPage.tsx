@@ -47,8 +47,9 @@ const ReportPage: React.FC = () => {
 
       // Session cookie is attached automatically by the browser.
       // bionicpro-auth validates the session, injects the Bearer token, and
-      // proxies the request to GET /pdf/reports/me on pdf-service.
-      // pdf-service fetches JSON from reports-api and renders it via @react-pdf/renderer.
+      // proxies the request to GET /reports/me/pdf on reports-api.
+      // reports-api checks S3 cache; on miss it fetches ClickHouse data, calls
+      // pdf-service to render the PDF, stores it in MinIO and returns a CDN URL.
       const response = await fetch(
         `${AUTH_URL}/api/reports/me/pdf?from=${from}&to=${to}`,
         { credentials: 'include' },

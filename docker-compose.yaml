@@ -187,8 +187,6 @@ services:
       dockerfile: Dockerfile
     environment:
       PORT: "5501"
-    depends_on:
-      - api
 
   # ── MinIO — S3-compatible object storage for PDF cache ──────────────────────
   minio:
