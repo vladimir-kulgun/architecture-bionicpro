@@ -75,7 +75,7 @@
         <!-- Apache Airflow (NEW) -->
         <mxCell id="r_c4" parent="1"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;"
-          value="&lt;b&gt;Apache Airflow&lt;/b&gt;&lt;br&gt;[Container: ETL Orchestrator]&lt;br&gt;&lt;br&gt;&lt;b&gt;DAG 1 — sensor_etl&lt;/b&gt;: извлечь телеметрию из PostgreSQL → агрегировать по пользователю → загрузить в ClickHouse (расписание: каждый час)&lt;br&gt;&lt;b&gt;DAG 2 — crm_etl&lt;/b&gt;: извлечь клиентов / заказы / историю обслуживания из CRM DB → обогатить данные → загрузить в ClickHouse (расписание: каждую ночь)&lt;br&gt;&lt;b&gt;DAG 3 — data_quality&lt;/b&gt;: проверка полноты и корректности витрины после каждой загрузки"
+          value="&lt;b&gt;Apache Airflow&lt;/b&gt;&lt;br&gt;[Container: ETL Orchestrator]&lt;br&gt;&lt;br&gt;&lt;b&gt;DAG bionicpro_etl&lt;/b&gt; (02:00 UTC ежедневно):&lt;br&gt;① extract_crm — JOIN raw_crm_* в ClickHouse → staging_crm_customers&lt;br&gt;② extract_telemetry — агрегаты из PostgreSQL → staging_telemetry&lt;br&gt;   (INSERT в staging_telemetry запускает MV mv_datamart_report)&lt;br&gt;③ validate_datamart — проверка строк и метрик"
           vertex="1">
           <mxGeometry x="200" y="500" width="740" height="160" as="geometry" />
         </mxCell>
@@ -151,6 +151,29 @@
           <mxGeometry x="1115" y="440" width="205" height="35" as="geometry" />
         </mxCell>
 
+        <!-- ══ pdf-service / MinIO / CDN (NEW) ══════════════════════════════════ -->
+
+        <mxCell id="r_pdf" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;"
+          value="&lt;b&gt;pdf-service&lt;/b&gt;&lt;br&gt;[Container: Node.js]&lt;br&gt;&lt;br&gt;Рендерит PDF из JSON&lt;br&gt;(@react-pdf/renderer).&lt;br&gt;POST /render → PDF stream."
+          vertex="1">
+          <mxGeometry x="1115" y="500" width="195" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_minio" parent="1"
+          style="shape=mxgraph.flowchart.database;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;"
+          value="&lt;b&gt;MinIO&lt;/b&gt;&lt;br&gt;[Container: S3-compatible]&lt;br&gt;&lt;br&gt;Кэш PDF-отчётов.&lt;br&gt;Ключ: reports/{user}/{from}_{to}/v{N}.pdf&lt;br&gt;+ latest-указатель."
+          vertex="1">
+          <mxGeometry x="1115" y="660" width="195" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_cdn" parent="1"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;"
+          value="&lt;b&gt;CDN (Nginx)&lt;/b&gt;&lt;br&gt;[Container: Reverse Proxy]&lt;br&gt;&lt;br&gt;Проксирует MinIO.&lt;br&gt;proxy_cache_valid 365d.&lt;br&gt;Отдаёт PDF по CDN URL."
+          vertex="1">
+          <mxGeometry x="1115" y="820" width="195" height="130" as="geometry" />
+        </mxCell>
+
         <!-- ══ Edges ═══════════════════════════════════════════════════════════ -->
 
         <!-- Actor: Пилот → Frontend -->
@@ -221,10 +244,10 @@
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <!-- Airflow → CRM DB (DAG 2: Extract) -->
-        <mxCell id="r_e9" edge="1" parent="1" source="r_c4" target="r_db3"
-          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
-          value="DAG 2: Extract&lt;br&gt;(JDBC, каждую ночь)">
+        <!-- Airflow reads raw_crm_* from ClickHouse (populated by Debezium CDC) -->
+        <mxCell id="r_e9" edge="1" parent="1" source="r_c4" target="r_db2"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;dashed=1;"
+          value="extract_crm: JOIN raw_crm_*&lt;br&gt;(CDC → Kafka → ClickHouse)">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
@@ -232,6 +255,34 @@
         <mxCell id="r_e10" edge="1" parent="1" source="r_ext_crm" target="r_db3"
           style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;"
           value="Данные клиентов и заказов">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Reports API → pdf-service -->
+        <mxCell id="r_e11" edge="1" parent="1" source="r_c2" target="r_pdf"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
+          value="POST /render (UserReport JSON)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Reports API → MinIO (cache check + write) -->
+        <mxCell id="r_e12" edge="1" parent="1" source="r_c2" target="r_minio"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
+          value="S3 GetObject / PutObject&lt;br&gt;(cache HIT/MISS)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CDN → MinIO -->
+        <mxCell id="r_e13" edge="1" parent="1" source="r_cdn" target="r_minio"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;"
+          value="proxy_pass (HTTP)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Frontend receives CDN URL -->
+        <mxCell id="r_e14" edge="1" parent="1" source="r_c2" target="r_cdn"
+          style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#555555;"
+          value="возвращает CDN URL&lt;br&gt;(JSON {url})">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
