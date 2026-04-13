@@ -129,6 +129,23 @@
         <mxCell id="e16" edge="1" parent="1" source="ext3" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" target="ext4" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
+        <!-- ── Row 3: Frontend + OpenLDAP ─────────────────────────────────── -->
+        <mxCell id="c7" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;" value="&lt;b&gt;Frontend&lt;/b&gt;&lt;br&gt;[Container: React SPA]&lt;br&gt;&lt;br&gt;Веб-приложение пользователя.&lt;br&gt;Аутентифицируется через BFF&lt;br&gt;по сессионному cookie." vertex="1">
+          <mxGeometry height="130" width="215" x="80" y="735" as="geometry" />
+        </mxCell>
+        <mxCell id="c8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#007AB8;fontColor=#ffffff;strokeColor=#004D7A;fontSize=11;strokeWidth=2;" value="&lt;b&gt;OpenLDAP&lt;/b&gt;&lt;br&gt;[Container: LDAP Directory]&lt;br&gt;&lt;br&gt;Каталог пользователей.&lt;br&gt;Keycloak федерирует через него.&lt;br&gt;В prod — заменяется внешним IdP." vertex="1">
+          <mxGeometry height="130" width="215" x="590" y="735" as="geometry" />
+        </mxCell>
+        <!-- ── Edges: Frontend + OpenLDAP ─────────────────────────────────── -->
+        <mxCell id="e17" edge="1" parent="1" source="p1" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;" target="c7" value="Просматривает отчёты">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" edge="1" parent="1" source="c7" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;strokeColor=#007AB8;strokeWidth=2;" target="c2" value="HTTPS + Session Cookie">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e19" edge="1" parent="1" source="c3" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;strokeColor=#555555;" target="c8" value="LDAP lookup (аутентификация пользователей)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
       </root>
     </mxGraphModel>
   </diagram>
