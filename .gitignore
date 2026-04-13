@@ -1,2 +1,11 @@
 /postgres-keycloak-data
 2024__yandex-architecture-sso.code-workspace
+/kafka-data
+/postgres-airflow-data
+/postgres-app-data
+/postgres-crm-data
+/minio-data
+/clickhouse-data
+/zookeeper-data
+/zookeeper-logs
+__pycache__
