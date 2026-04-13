@@ -37,6 +37,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -476,17 +477,26 @@ func (s *server) handleMyReportPDF(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cache key is stable for a given user + date range (historical data is immutable).
-	cacheKey := fmt.Sprintf("reports/%s/%s_%s.pdf", userID, from, to)
-
-	// S3+CDN path: check cache, generate on miss, always return a URL.
+	// S3+CDN path: versioned key structure prevents Nginx from serving stale PDFs
+	// after ETL data corrections. The "latest" pointer holds the current version
+	// number; bumping it forces a cache miss on the next request without any Nginx
+	// purge — the old versioned URL simply expires from the Nginx cache naturally.
+	//
+	// S3 layout:
+	//   reports/{userID}/{from}_{to}/latest   — text file: current version number
+	//   reports/{userID}/{from}_{to}/v1.pdf   — immutable once written
+	//   reports/{userID}/{from}_{to}/v2.pdf   — written after invalidation, etc.
 	if s.s3 != nil {
-		cdnFileURL := strings.TrimRight(s.cfg.cdnURL, "/") + "/" + s.cfg.s3Bucket + "/" + cacheKey
+		latestKey := fmt.Sprintf("reports/%s/%s_%s/latest", userID, from, to)
+		version := s.readVersion(r.Context(), latestKey)
 
-		// Cache hit: object already in S3 — skip ClickHouse and pdf-service entirely.
-		_, err := s.s3.StatObject(r.Context(), s.cfg.s3Bucket, cacheKey, minio.StatObjectOptions{})
+		versionedKey := fmt.Sprintf("reports/%s/%s_%s/v%d.pdf", userID, from, to, version)
+		cdnFileURL := strings.TrimRight(s.cfg.cdnURL, "/") + "/" + s.cfg.s3Bucket + "/" + versionedKey
+
+		// Cache hit: versioned PDF already exists in S3 — skip ClickHouse entirely.
+		_, err := s.s3.StatObject(r.Context(), s.cfg.s3Bucket, versionedKey, minio.StatObjectOptions{})
 		if err == nil {
-			s.log.Info("pdf cache hit", "user_id", userID, "key", cacheKey)
+			s.log.Info("pdf cache hit", "user_id", userID, "key", versionedKey)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"url": cdnFileURL}) //nolint:errcheck
 			return
@@ -501,19 +511,25 @@ func (s *server) handleMyReportPDF(w http.ResponseWriter, r *http.Request) {
 		}
 
 		filename := fmt.Sprintf("report_%s_%s.pdf", from, to)
-		_, err = s.s3.PutObject(r.Context(), s.cfg.s3Bucket, cacheKey,
+		_, err = s.s3.PutObject(r.Context(), s.cfg.s3Bucket, versionedKey,
 			bytes.NewReader(pdfBytes), int64(len(pdfBytes)),
 			minio.PutObjectOptions{
 				ContentType:        "application/pdf",
 				ContentDisposition: `attachment; filename="` + filename + `"`,
 			})
 		if err != nil {
-			s.log.Error("s3 upload failed", "key", cacheKey, "err", err)
+			s.log.Error("s3 upload failed", "key", versionedKey, "err", err)
 			http.Error(w, "failed to store report", http.StatusInternalServerError)
 			return
 		}
 
-		s.log.Info("pdf uploaded to s3", "user_id", userID, "key", cacheKey)
+		// Write the version pointer last — reader always sees a consistent state.
+		vStr := strconv.Itoa(version)
+		_, _ = s.s3.PutObject(r.Context(), s.cfg.s3Bucket, latestKey,
+			strings.NewReader(vStr), int64(len(vStr)),
+			minio.PutObjectOptions{ContentType: "text/plain"})
+
+		s.log.Info("pdf uploaded to s3", "user_id", userID, "key", versionedKey)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"url": cdnFileURL}) //nolint:errcheck
 		return
@@ -688,6 +704,112 @@ func escapeString(s string) string {
 	return strings.ReplaceAll(s, "'", "\\'")
 }
 
+// readVersion reads the integer stored in the S3 "latest" pointer for a report.
+// Returns 1 if the object does not exist yet (first-time generation).
+func (s *server) readVersion(ctx context.Context, latestKey string) int {
+	obj, err := s.s3.GetObject(ctx, s.cfg.s3Bucket, latestKey, minio.GetObjectOptions{})
+	if err != nil {
+		return 1
+	}
+	defer obj.Close()
+	data, err := io.ReadAll(obj)
+	if err != nil || len(data) == 0 {
+		return 1
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || v < 1 {
+		return 1
+	}
+	return v
+}
+
+// POST /internal/invalidate
+//
+// Called by Airflow (or an operator) after ETL data is re-processed for a date.
+// Increments the "latest" version pointer for every cached report whose date range
+// overlaps the given date, causing the next client request to regenerate the PDF.
+// Stale PDF objects are also removed to free storage; the matching Nginx cache
+// entry expires naturally (no purge module required).
+//
+// Request body: {"date": "YYYY-MM-DD"}
+// Response:     {"invalidated": N}  — number of report ranges bumped.
+func (s *server) handleInvalidate(w http.ResponseWriter, r *http.Request) {
+	if s.s3 == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]int{"invalidated": 0}) //nolint:errcheck
+		return
+	}
+
+	var body struct {
+		Date string `json:"date"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Date == "" {
+		http.Error(w, `body must be {"date":"YYYY-MM-DD"}`, http.StatusBadRequest)
+		return
+	}
+	if _, err := time.Parse("2006-01-02", body.Date); err != nil {
+		http.Error(w, "'date' must be YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	invalidated := 0
+
+	// Iterate over every "latest" pointer: reports/{userID}/{from}_{to}/latest
+	for obj := range s.s3.ListObjects(ctx, s.cfg.s3Bucket, minio.ListObjectsOptions{
+		Prefix:    "reports/",
+		Recursive: true,
+	}) {
+		if obj.Err != nil {
+			s.log.Warn("invalidate: list error", "err", obj.Err)
+			continue
+		}
+		if !strings.HasSuffix(obj.Key, "/latest") {
+			continue
+		}
+
+		// Key format: reports/{userID}/{from}_{to}/latest  (4 slash-separated segments)
+		parts := strings.Split(obj.Key, "/")
+		if len(parts) != 4 {
+			continue
+		}
+		// {from}_{to} — dates contain '-', the separator between them is '_'
+		rangeParts := strings.SplitN(parts[2], "_", 2)
+		if len(rangeParts) != 2 {
+			continue
+		}
+		from, to := rangeParts[0], rangeParts[1]
+
+		// Skip reports whose date range does not include the invalidated date.
+		if body.Date < from || body.Date > to {
+			continue
+		}
+
+		// Bump version: read N, write N+1.
+		v := s.readVersion(ctx, obj.Key)
+		next := strconv.Itoa(v + 1)
+		_, err := s.s3.PutObject(ctx, s.cfg.s3Bucket, obj.Key,
+			strings.NewReader(next), int64(len(next)),
+			minio.PutObjectOptions{ContentType: "text/plain"})
+		if err != nil {
+			s.log.Warn("invalidate: version bump failed", "key", obj.Key, "err", err)
+			continue
+		}
+
+		// Remove the now-stale PDF to free storage.
+		staleKey := strings.TrimSuffix(obj.Key, "/latest") + "/v" + strconv.Itoa(v) + ".pdf"
+		if err := s.s3.RemoveObject(ctx, s.cfg.s3Bucket, staleKey, minio.RemoveObjectOptions{}); err != nil {
+			s.log.Warn("invalidate: remove stale pdf failed", "key", staleKey, "err", err)
+		}
+
+		invalidated++
+		s.log.Info("cache invalidated", "range", parts[2], "user", parts[1], "v", v, "→", v+1)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"invalidated": invalidated}) //nolint:errcheck
+}
+
 // ── CORS middleware ────────────────────────────────────────────────────────────
 
 func (s *server) cors(next http.Handler) http.Handler {
@@ -722,6 +844,10 @@ func main() {
 	// Admin lookup: requires administrator role (enforced by requireAdmin middleware).
 	// prothetic_user gets 403 before the handler runs, regardless of the user_id value.
 	mux.HandleFunc("GET /reports/{user_id}", srv.requireAdmin(srv.handleAdminGetReport))
+
+	// Cache invalidation — called by Airflow after ETL data corrections.
+	// Internal-only: not exposed through the BFF.
+	mux.HandleFunc("POST /internal/invalidate", srv.handleInvalidate)
 
 	// Liveness probe — no auth required.
 	mux.HandleFunc("GET /health", srv.handleHealth)
