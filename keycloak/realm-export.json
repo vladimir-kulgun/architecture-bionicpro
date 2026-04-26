@@ -245,6 +245,7 @@
       "realmRoles": ["administrator"]
     },
     {
+      "id": "3ca00e3e-b8d4-40b6-842f-4a111542e13d",
       "username": "prothetic1",
       "enabled": true,
       "email": "prothetic1@example.com",
@@ -254,6 +255,7 @@
       "realmRoles": ["prothetic_user"]
     },
     {
+      "id": "f992e346-c37e-4a8a-a5be-6920ade928f0",
       "username": "prothetic2",
       "enabled": true,
       "email": "prothetic2@example.com",
@@ -263,6 +265,7 @@
       "realmRoles": ["prothetic_user"]
     },
     {
+      "id": "31b18f98-2395-4d00-a492-0b3fa5900b99",
       "username": "prothetic3",
       "enabled": true,
       "email": "prothetic3@example.com",

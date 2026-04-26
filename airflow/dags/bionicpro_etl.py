@@ -307,8 +307,8 @@ def extract_crm(**_) -> None:
         c.last_name,
         c.email,
         coalesce(nullIf(o.prosthetics_model, ''), 'Unknown')                AS prosthetics_model,
-        if(o.order_date > 0,
-           toString(addDays(toDate('1970-01-01'), o.order_date)),    '')     AS order_date,
+        if(o.ord_date > 0,
+           toString(addDays(toDate('1970-01-01'), o.ord_date)),    '')      AS order_date,
         if(isNotNull(o.delivery_date) AND o.delivery_date > 0,
            toString(addDays(toDate('1970-01-01'), o.delivery_date)), '')     AS delivery_date,
         coalesce(s.last_service_date, '')                                   AS last_service_date,
@@ -325,7 +325,7 @@ def extract_crm(**_) -> None:
             customer_id,
             argMax(id,                order_date) AS id,
             argMax(prosthetics_model, order_date) AS prosthetics_model,
-            argMax(order_date,        order_date) AS order_date,
+            max(order_date)                        AS ord_date,
             argMax(delivery_date,     order_date) AS delivery_date
         FROM   raw_crm_orders FINAL
         WHERE  __deleted = 0

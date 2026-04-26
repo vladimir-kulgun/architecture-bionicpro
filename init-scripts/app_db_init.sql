@@ -58,9 +58,9 @@ SELECT
 FROM
     -- Three simulated prothetic users
     (VALUES
-        ('kc-prothetic-001', 0.0),
-        ('kc-prothetic-002', 5.0),
-        ('kc-prothetic-003', -3.0)
+        ('3ca00e3e-b8d4-40b6-842f-4a111542e13d', 0.0),
+        ('f992e346-c37e-4a8a-a5be-6920ade928f0', 5.0),
+        ('31b18f98-2395-4d00-a492-0b3fa5900b99', -3.0)
     ) AS users(uid, base_signal_offset),
     -- Last 7 days
     generate_series(

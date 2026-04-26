@@ -11,7 +11,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o reports-api .
 # ── Runtime image ──────────────────────────────────────────────────────────────
 FROM alpine:3.19
 
-RUN apk --no-cache add ca-certificates tzdata
+RUN sed -i 's|dl-cdn.alpinelinux.org/alpine|mirror.yandex.ru/mirrors/alpine|g' /etc/apk/repositories \
+    && apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 COPY --from=builder /app/reports-api .

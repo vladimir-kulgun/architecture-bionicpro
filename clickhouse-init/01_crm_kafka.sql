@@ -27,14 +27,14 @@ CREATE TABLE IF NOT EXISTS kafka_crm_customers
 (
     id          Int32,
     keycloak_id String,
-    first_name  String  DEFAULT '',
-    last_name   String  DEFAULT '',
-    email       String  DEFAULT '',
-    phone       String  DEFAULT '',
-    created_at  String  DEFAULT '',  -- TIMESTAMPTZ → ISO-8601 string
-    __deleted   UInt8   DEFAULT 0,
-    __op        String  DEFAULT '',
-    __ts_ms     Int64   DEFAULT 0
+    first_name  String,
+    last_name   String,
+    email       String,
+    phone       String,
+    created_at  String,
+    __deleted   UInt8,
+    __op        String,
+    __ts_ms     Int64
 )
 ENGINE = Kafka
 SETTINGS
@@ -50,14 +50,14 @@ CREATE TABLE IF NOT EXISTS kafka_crm_orders
 (
     id                Int32,
     customer_id       Int32,
-    prosthetics_model String          DEFAULT '',
-    serial_number     String          DEFAULT '',
-    order_date        Int32           DEFAULT 0,  -- days since 1970-01-01
-    delivery_date     Nullable(Int32),             -- NULL until delivered
-    status            String          DEFAULT '',
-    __deleted         UInt8           DEFAULT 0,
-    __op              String          DEFAULT '',
-    __ts_ms           Int64           DEFAULT 0
+    prosthetics_model String,
+    serial_number     String,
+    order_date        Int32,
+    delivery_date     Nullable(Int32),
+    status            String,
+    __deleted         UInt8,
+    __op              String,
+    __ts_ms           Int64
 )
 ENGINE = Kafka
 SETTINGS
@@ -73,13 +73,13 @@ CREATE TABLE IF NOT EXISTS kafka_crm_service_history
 (
     id            Int32,
     order_id      Int32,
-    service_date  Int32   DEFAULT 0,  -- days since 1970-01-01
-    service_type  String  DEFAULT '',
-    technician    String  DEFAULT '',
-    notes         String  DEFAULT '',
-    __deleted     UInt8   DEFAULT 0,
-    __op          String  DEFAULT '',
-    __ts_ms       Int64   DEFAULT 0
+    service_date  Int32,
+    service_type  String,
+    technician    String,
+    notes         String,
+    __deleted     UInt8,
+    __op          String,
+    __ts_ms       Int64
 )
 ENGINE = Kafka
 SETTINGS

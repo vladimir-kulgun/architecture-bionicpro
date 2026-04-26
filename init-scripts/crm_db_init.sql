@@ -56,9 +56,9 @@ CREATE INDEX IF NOT EXISTS idx_service_order
 -- keycloak_id values must match those used in app_db prosthetics_telemetry.
 
 INSERT INTO crm_customers (keycloak_id, first_name, last_name, email, phone) VALUES
-    ('kc-prothetic-001', 'Александр', 'Иванов',   'prothetic1@example.com', '+7-900-001-01-01'),
-    ('kc-prothetic-002', 'Мария',     'Петрова',  'prothetic2@example.com', '+7-900-002-02-02'),
-    ('kc-prothetic-003', 'Дмитрий',   'Сидоров',  'prothetic3@example.com', '+7-900-003-03-03');
+    ('3ca00e3e-b8d4-40b6-842f-4a111542e13d', 'Александр', 'Иванов',   'prothetic1@example.com', '+7-900-001-01-01'),
+    ('f992e346-c37e-4a8a-a5be-6920ade928f0', 'Мария',     'Петрова',  'prothetic2@example.com', '+7-900-002-02-02'),
+    ('31b18f98-2395-4d00-a492-0b3fa5900b99', 'Дмитрий',   'Сидоров',  'prothetic3@example.com', '+7-900-003-03-03');
 
 INSERT INTO crm_orders
     (customer_id, prosthetics_model, serial_number, order_date, delivery_date, status)

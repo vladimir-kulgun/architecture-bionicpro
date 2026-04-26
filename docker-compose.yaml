@@ -72,11 +72,13 @@ services:
   # ── ClickHouse — OLAP data mart ──────────────────────────────────────────────
   clickhouse:
     image: clickhouse/clickhouse-server:24.3
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
       - "8123:8123"   # HTTP API  (used by Airflow DAG and Reports API)
       - "9000:9000"   # Native TCP client (optional, for clickhouse-client CLI)
     volumes:
-      - ./clickhouse-data:/var/lib/clickhouse
+      - clickhouse_data:/var/lib/clickhouse
       # Kafka Engine tables + Materialized Views — executed on first container start
       - ./clickhouse-init:/docker-entrypoint-initdb.d:ro
     ulimits:
@@ -164,10 +166,7 @@ services:
       bash -c "
         pip install apache-airflow-providers-postgres requests --quiet &&
         airflow db upgrade &&
-        airflow users create
-          --username admin --password admin
-          --firstname Admin --lastname BionicPRO
-          --role Admin --email admin@bionicpro.com
+        airflow users create --username admin --password admin --firstname Admin --lastname BionicPRO --role Admin --email admin@bionicpro.com
       "
     restart: "no"
 
@@ -309,3 +308,6 @@ services:
       REACT_APP_AUTH_URL: http://localhost:8001
     depends_on:
       - bionicpro-auth
+
+volumes:
+  clickhouse_data:
