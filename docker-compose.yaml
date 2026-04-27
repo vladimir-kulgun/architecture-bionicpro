@@ -204,7 +204,9 @@ services:
     ports:
       - "5433:5432"
   keycloak:
-    image: quay.io/keycloak/keycloak:21.1
+    build:
+      context: ./keycloak
+      dockerfile: Dockerfile
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -230,6 +232,7 @@ services:
       - "8001:8001"
     environment:
       KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
       KEYCLOAK_REALM: reports-realm
       KEYCLOAK_CLIENT_ID: reports-frontend
       AUTH_REDIRECT_URI: http://localhost:8001/auth/callback

@@ -109,15 +109,15 @@ const SummaryCard: React.FC<CardProps> = ({ label, value, error, last }) => (
 
 const TableHeader: React.FC = () => (
     <View style={s.tableHeader} fixed>
-        <Text style={[s.th, s.cDate]}>Дата</Text>
-        <Text style={[s.th, s.cNum3]}>Сессий</Text>
-        <Text style={[s.th, s.cNum3]}>Акт.мин</Text>
-        <Text style={[s.th, s.cNum4]}>Сигнал ср.</Text>
-        <Text style={[s.th, s.cNum4]}>Сигнал макс.</Text>
-        <Text style={[s.th, s.cNum3]}>Движений</Text>
-        <Text style={[s.th, s.cNum3]}>Ошибок</Text>
-        <Text style={[s.th, s.cNum4]}>Батарея ср.</Text>
-        <Text style={[s.th, s.cNum4]}>Батарея мин.</Text>
+        <Text style={[s.th, s.cDate]}>Date</Text>
+        <Text style={[s.th, s.cNum3]}>Sessions</Text>
+        <Text style={[s.th, s.cNum3]}>Act.min</Text>
+        <Text style={[s.th, s.cNum4]}>Signal avg</Text>
+        <Text style={[s.th, s.cNum4]}>Signal max</Text>
+        <Text style={[s.th, s.cNum3]}>Movements</Text>
+        <Text style={[s.th, s.cNum3]}>Errors</Text>
+        <Text style={[s.th, s.cNum4]}>Battery avg</Text>
+        <Text style={[s.th, s.cNum4]}>Battery min</Text>
     </View>
 );
 
@@ -141,48 +141,48 @@ const ProstheticsReport: React.FC<{ report: UserReport }> = ({ report }) => {
     const { summary: sm, daily_reports: days, period } = report;
 
     return (
-        <Document title="Отчёт по протезу" author="BionicPRO">
+        <Document title="Prosthetics Report" author="BionicPRO">
             <Page size="A4" style={s.page}>
 
                 {/* Title */}
                 <View style={s.titleRow}>
-                    <Text style={s.title}>Отчёт по протезу</Text>
+                    <Text style={s.title}>Prosthetics Report</Text>
                     <Text style={s.subtitle}>BionicPRO · {period.from} — {period.to}</Text>
                 </View>
                 <View style={s.divider} />
 
                 {/* Profile */}
-                <Text style={s.sectionTitle}>Информация о пользователе</Text>
+                <Text style={s.sectionTitle}>User Information</Text>
                 <View style={s.infoGrid}>
-                    <InfoRow label="Пользователь"  value={`${report.first_name} ${report.last_name}`} />
+                    <InfoRow label="User"           value={`${report.first_name} ${report.last_name}`} />
                     <InfoRow label="Email"          value={report.email} />
-                    <InfoRow label="Модель протеза" value={report.prosthetics_model} />
-                    <InfoRow label="Дата поставки"  value={report.delivery_date} />
-                    <InfoRow label="Последнее ТО"   value={report.last_service_date} />
-                    <InfoRow label="Дата заказа"    value={report.order_date} />
+                    <InfoRow label="Prosthetic model" value={report.prosthetics_model} />
+                    <InfoRow label="Delivery date"  value={report.delivery_date} />
+                    <InfoRow label="Last service"   value={report.last_service_date} />
+                    <InfoRow label="Order date"     value={report.order_date} />
                 </View>
                 <View style={s.divider} />
 
                 {/* Summary */}
-                <Text style={s.sectionTitle}>Сводка за период</Text>
+                <Text style={s.sectionTitle}>Period Summary</Text>
                 <View style={s.cardRow}>
-                    <SummaryCard label="Активных дней"    value={String(sm.total_days_active)} />
-                    <SummaryCard label="Активных минут"   value={String(sm.total_active_minutes)} />
-                    <SummaryCard label="Движений"         value={String(sm.total_movements)} last />
+                    <SummaryCard label="Active days"    value={String(sm.total_days_active)} />
+                    <SummaryCard label="Active minutes" value={String(sm.total_active_minutes)} />
+                    <SummaryCard label="Movements"      value={String(sm.total_movements)} last />
                 </View>
                 <View style={[s.cardRow, { marginBottom: 14 }]}>
-                    <SummaryCard label="Ошибок"           value={String(sm.total_errors)}
+                    <SummaryCard label="Errors"         value={String(sm.total_errors)}
                                  error={sm.total_errors > 0} />
-                    <SummaryCard label="Ср. сигнал, мВ"   value={sm.avg_signal_strength_mv.toFixed(1)} />
-                    <SummaryCard label="Ср. заряд, %"     value={sm.avg_battery_level_pct.toFixed(1)} last />
+                    <SummaryCard label="Avg signal, mV" value={sm.avg_signal_strength_mv.toFixed(1)} />
+                    <SummaryCard label="Avg battery, %" value={sm.avg_battery_level_pct.toFixed(1)} last />
                 </View>
                 <View style={s.divider} />
 
                 {/* Daily table */}
                 <View style={s.tableSection}>
-                    <Text style={[s.sectionTitle, { marginBottom: 6 }]}>Данные по дням</Text>
+                    <Text style={[s.sectionTitle, { marginBottom: 6 }]}>Daily Data</Text>
                     {days.length === 0 ? (
-                        <Text style={{ color: GRAY }}>За выбранный период данных нет.</Text>
+                        <Text style={{ color: GRAY }}>No data for the selected period.</Text>
                     ) : (
                         <View>
                             <TableHeader />

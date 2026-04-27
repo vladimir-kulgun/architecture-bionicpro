@@ -563,7 +563,7 @@ func (s *server) generatePDF(ctx context.Context, userID, from, to string) ([]by
 		return nil, fmt.Errorf("encode report: %w", err)
 	}
 
-	pdfURL := strings.TrimRight(s.cfg.pdfServiceURL, "/") + "/render"
+	pdfURL := strings.TrimRight(s.cfg.pdfServiceURL, "/") + "/pdf/render"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pdfURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("build pdf request: %w", err)

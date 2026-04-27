@@ -36,16 +36,17 @@ import (
 // ── Configuration ──────────────────────────────────────────────────────────────
 
 type config struct {
-	keycloakURL     string
-	keycloakRealm   string
-	clientID        string
-	redirectURI     string
-	frontendURL     string
-	apiURL          string
-	sessionLifetime time.Duration
-	cookieSecure    bool
-	encryptionKey   string
-	databaseURL     string
+	keycloakURL       string
+	keycloakPublicURL string // browser-facing URL (may differ from internal)
+	keycloakRealm     string
+	clientID          string
+	redirectURI       string
+	frontendURL       string
+	apiURL            string
+	sessionLifetime   time.Duration
+	cookieSecure      bool
+	encryptionKey     string
+	databaseURL       string
 }
 
 func loadConfig() config {
@@ -53,8 +54,9 @@ func loadConfig() config {
 	fmt.Sscanf(getenv("SESSION_LIFETIME", "1800"), "%d", &lifetime)
 
 	return config{
-		keycloakURL:     getenv("KEYCLOAK_URL", "http://keycloak:8080"),
-		keycloakRealm:   getenv("KEYCLOAK_REALM", "reports-realm"),
+		keycloakURL:       getenv("KEYCLOAK_URL", "http://keycloak:8080"),
+		keycloakPublicURL: getenv("KEYCLOAK_PUBLIC_URL", getenv("KEYCLOAK_URL", "http://keycloak:8080")),
+		keycloakRealm:     getenv("KEYCLOAK_REALM", "reports-realm"),
 		clientID:        getenv("KEYCLOAK_CLIENT_ID", "reports-frontend"),
 		redirectURI:     getenv("AUTH_REDIRECT_URI", "http://localhost:8001/auth/callback"),
 		frontendURL:     getenv("FRONTEND_URL", "http://localhost:3000"),
@@ -323,6 +325,11 @@ func (s *server) authURL() string {
 		s.cfg.keycloakURL, s.cfg.keycloakRealm)
 }
 
+func (s *server) authPublicURL() string {
+	return fmt.Sprintf("%s/realms/%s/protocol/openid-connect/auth",
+		s.cfg.keycloakPublicURL, s.cfg.keycloakRealm)
+}
+
 func (s *server) userInfoURL() string {
 	return fmt.Sprintf("%s/realms/%s/protocol/openid-connect/userinfo",
 		s.cfg.keycloakURL, s.cfg.keycloakRealm)
@@ -451,12 +458,12 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		"response_type":         {"code"},
 		"client_id":             {s.cfg.clientID},
 		"redirect_uri":          {s.cfg.redirectURI},
-		"scope":                 {"openid"},
+		"scope":                 {"openid roles"},
 		"state":                 {state},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 	}
-	http.Redirect(w, r, s.authURL()+"?"+params.Encode(), http.StatusFound)
+	http.Redirect(w, r, s.authPublicURL()+"?"+params.Encode(), http.StatusFound)
 }
 
 // GET /auth/callback
@@ -673,7 +680,18 @@ func (s *server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	// ── Phase 5: relay response + rotated session cookie ──────────────────────
+	// Skip CORS headers from upstream — the BFF's own cors() middleware owns them.
+	skipResp := map[string]bool{
+		"access-control-allow-origin":      true,
+		"access-control-allow-credentials": true,
+		"access-control-allow-methods":     true,
+		"access-control-allow-headers":     true,
+		"access-control-expose-headers":    true,
+	}
 	for k, vv := range resp.Header {
+		if skipResp[strings.ToLower(k)] {
+			continue
+		}
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}

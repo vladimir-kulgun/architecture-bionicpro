@@ -2,6 +2,34 @@
   "realm": "reports-realm",
   "enabled": true,
 
+  "clientScopes": [
+    {
+      "name": "roles",
+      "description": "OpenID Connect scope for add user roles information to the access and id token",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false",
+        "consent.screen.text": ""
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "user.attribute": "foo",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+
   "accessTokenLifespan": 120,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 1800,
@@ -134,7 +162,7 @@
     {
       "alias": "yandex",
       "displayName": "Яндекс ID",
-      "providerId": "oidc",
+      "providerId": "yandex",
       "enabled": true,
       "trustEmail": false,
       "storeToken": false,
@@ -213,6 +241,16 @@
         "claim": "id",
         "user.attribute": "yandex_id"
       }
+    },
+    {
+      "id": "4e54ee4e-3d16-4dbb-8c8c-bd2e77631736",
+      "name": "yandex-role-prothetic_user",
+      "identityProviderAlias": "yandex",
+      "identityProviderMapper": "oidc-hardcoded-role-idp-mapper",
+      "config": {
+        "syncMode": "FORCE",
+        "role": "prothetic_user"
+      }
     }
   ],
 
@@ -284,7 +322,9 @@
       "redirectUris": ["http://localhost:3000/*", "http://localhost:8001/auth/callback"],
       "webOrigins": ["http://localhost:3000"],
       "directAccessGrantsEnabled": false,
-      "consentRequired": true,
+      "consentRequired": false,
+      "defaultClientScopes": ["web-origins", "acr", "roles", "profile", "email"],
+      "optionalClientScopes": ["address", "phone", "offline_access", "microprofile-jwt"],
       "attributes": {
         "pkce.code.challenge.method": "S256"
       }
