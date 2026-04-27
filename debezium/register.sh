@@ -25,17 +25,27 @@ if [ "$HTTP_STATUS" = "200" ]; then
     exit 0
 fi
 
-echo "[register.sh] Registering connector '${CONNECTOR_NAME}' ..."
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-    -H "Content-Type: application/json" \
-    --data "@${CONNECTOR_FILE}" \
-    "${CONNECT_URL}/connectors")
+echo "[register.sh] Registering connector '${CONNECTOR_NAME}' (retries up to 30×10s) ..."
+ATTEMPTS=0
+HTTP_CODE=""
+while [ "$ATTEMPTS" -lt 30 ]; do
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        --data "@${CONNECTOR_FILE}" \
+        "${CONNECT_URL}/connectors")
+    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+    BODY=$(echo "$RESPONSE" | head -n -1)
+    if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "409" ]; then
+        break
+    fi
+    ATTEMPTS=$((ATTEMPTS + 1))
+    echo "[register.sh] HTTP ${HTTP_CODE} — retrying in 10s (attempt ${ATTEMPTS}/30)..."
+    echo "  $BODY" | head -c 200
+    sleep 10
+done
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | head -n -1)
-
-if [ "$HTTP_CODE" != "201" ]; then
-    echo "[register.sh] ERROR: Kafka Connect returned HTTP ${HTTP_CODE}"
+if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "409" ]; then
+    echo "[register.sh] ERROR: could not register connector after 30 attempts (HTTP ${HTTP_CODE})"
     echo "$BODY"
     exit 1
 fi

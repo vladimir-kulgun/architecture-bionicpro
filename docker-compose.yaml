@@ -93,8 +93,8 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     volumes:
-      - ./zookeeper-data:/var/lib/zookeeper/data
-      - ./zookeeper-logs:/var/lib/zookeeper/log
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
 
   # ── Kafka — message broker for CDC events ─────────────────────────────────────
   kafka:
@@ -112,7 +112,7 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
-      - ./kafka-data:/var/lib/kafka/data
+      - kafka_data:/var/lib/kafka/data
 
   # ── Kafka Connect (Debezium) — CDC connector runtime ─────────────────────────
   kafka-connect:
@@ -134,8 +134,8 @@ services:
       # JSON without schema — produces flat records after ExtractNewRecordState SMT
       KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
 
   # ── connector-init — registers Debezium connector once on startup ─────────────
   connector-init:
@@ -145,6 +145,30 @@ services:
     volumes:
       - ./debezium:/debezium:ro
     entrypoint: ["/bin/sh", "/debezium/register.sh"]
+    restart: "no"
+
+  # ── data-seed — one-shot: waits for CDC then seeds the ClickHouse data mart ───
+  data-seed:
+    image: apache/airflow:2.9.2
+    user: "50000:0"
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["python3 /seed_datamart.py"]
+    depends_on:
+      - connector-init
+      - airflow-scheduler
+      - airflow_db
+      - app_db
+      - clickhouse
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_db:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLt0nfdstA="
+      AIRFLOW__WEBSERVER__SECRET_KEY: "bionicpro-dev-secret"
+      HOME: /tmp
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./scripts/seed_datamart.py:/seed_datamart.py:ro
     restart: "no"
 
   # ── Airflow metadata database ─────────────────────────────────────────────────
@@ -203,6 +227,11 @@ services:
       - ./postgres-keycloak-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak_user -d keycloak_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
   keycloak:
     build:
       context: ./keycloak
@@ -214,7 +243,7 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
-    command: 
+    command:
       - start-dev
       - --import-realm
     volumes:
@@ -222,8 +251,10 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - keycloak_db
-      - openldap
+      keycloak_db:
+        condition: service_healthy
+      openldap:
+        condition: service_started
   bionicpro-auth:
     build:
       context: ./bionicpro-auth
@@ -314,3 +345,6 @@ services:
 
 volumes:
   clickhouse_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_logs:
