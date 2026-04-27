@@ -1,0 +1,9 @@
+# Normalize all text files to LF in the repo and on checkout.
+# Prevents CRLF from breaking shell scripts run inside Linux containers.
+* text=auto eol=lf
+
+# Treat binary files as binary (no line-ending conversion).
+*.png binary
+*.jpg binary
+*.pdf binary
+*.drawio binary

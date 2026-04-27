@@ -1,0 +1,41 @@
+{
+  "name": "crm-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+
+    "database.hostname": "crm_db",
+    "database.port":     "5432",
+    "database.user":     "crm_user",
+    "database.password": "crm_password",
+    "database.dbname":   "crm",
+
+    "topic.prefix":       "crm",
+    "table.include.list": "public.crm_customers,public.crm_orders,public.crm_service_history",
+
+    "plugin.name":                   "pgoutput",
+    "slot.name":                     "debezium_crm_slot",
+    "publication.name":              "debezium_crm_pub",
+    "publication.autocreate.mode":   "filtered",
+
+    "snapshot.mode": "initial",
+
+    "topic.creation.enable":                              "true",
+    "topic.creation.default.replication.factor":          "1",
+    "topic.creation.default.partitions":                  "1",
+    "topic.creation.default.cleanup.policy":              "delete",
+    "topic.creation.default.retention.ms":                "-1",
+
+    "heartbeat.interval.ms":    "10000",
+    "slot.max.retries":         "5",
+    "slot.retry.delay.ms":      "10000",
+
+    "errors.log.enable":            "true",
+    "errors.log.include.messages":  "true",
+
+    "transforms":                             "unwrap",
+    "transforms.unwrap.type":                 "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones":      "true",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
+    "transforms.unwrap.add.fields":           "op,ts_ms"
+  }
+}
